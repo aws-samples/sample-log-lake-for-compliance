@@ -1,0 +1,166 @@
+AWSTemplateFormatVersion : 2010-09-09
+Description: "Create metadata objects for Log Lake, including one Glue Database, and four Glue Tables (CloudTrail and CloudWatch raw tables, and CloudTrail and CloudWatch readready tables)"
+Parameters:
+  myGlueDatabaseName:
+    Type: String
+    Description: Glue database name to be created for LogLake.
+  myBucketNameForReadReadyCloudTrail:
+    Type: String
+  myBucketNameForReadReadyCloudWatch:
+    Type: String
+  myPrefixForCloudTrail:
+    Type: String
+  myPrefixForCloudWatch:
+    Type: String
+Resources:
+  FromCloudTrailReadReadyTable:
+    Type: AWS::Glue::Table
+    Properties:
+      CatalogId: !Ref AWS::AccountId
+      DatabaseName: !Ref myGlueDatabaseName
+      TableInput:
+        Name: from_cloudtrail_readready
+        TableType: EXTERNAL_TABLE
+        Parameters: {
+          "classification": "orc",
+          "notes": "demo",
+          "orc.compress": "ZLIB",
+          "partition_filtering.enabled": "true"
+        }
+        StorageDescriptor:
+          Location: !Sub s3://${myBucketNameForReadReadyCloudTrail}/${myPrefixForCloudTrail}
+          InputFormat: org.apache.hadoop.hive.ql.io.orc.OrcInputFormat
+          OutputFormat: org.apache.hadoop.hive.ql.io.orc.OrcOutputFormat
+          Columns:
+            - Name: awsregion
+              Type: string
+            - Name: logaccountid
+              Type: bigint
+            - Name: useridentity_type
+              Type: string
+            - Name: useridentity_principalid
+              Type: string
+            - Name: useridentity_arn
+              Type: string
+            - Name: useridentity_accountid
+              Type: bigint
+            - Name: useridentity_sessioncontext_sourceidentity
+              Type: varchar(9999)
+            - Name: eventtime
+              Type: timestamp
+            - Name: eventsource
+              Type: string
+            - Name: eventname
+              Type: string
+            - Name: sourceipaddress
+              Type: string
+            - Name: errorcode
+              Type: string
+            - Name: errormessage
+              Type: string
+            - Name: rolearn
+              Type: string
+            - Name: principalarn
+              Type: string
+            - Name: principaltags_env
+              Type: string
+            - Name: principaltags_ro
+              Type: string
+            - Name: principaltags
+              Type: string
+            - Name: durationseconds
+              Type: string
+            - Name: targetinstance
+              Type: string
+            - Name: sessionid_from_responseelements
+              Type: string
+            - Name: requestid
+              Type: string
+            - Name: eventid
+              Type: string
+            - Name: readonly
+              Type: boolean
+            - Name: eventtype
+              Type: string
+            - Name: managementevent
+              Type: boolean
+            - Name: recipientaccountid
+              Type: bigint
+            - Name: eventjson
+              Type: string
+            - Name: f_theuser
+              Type: string
+            - Name: f_activityid
+              Type: string
+            - Name: f_sessionid
+              Type: string
+            - Name: updated_time
+              Type: timestamp
+          SerdeInfo:
+            SerializationLibrary: org.apache.hadoop.hive.ql.io.orc.OrcSerde
+        PartitionKeys:
+          - Name: logcalendarday
+            Type: int
+          - Name: loghour
+            Type: int
+  FromCloudWatchReadReadyTable:
+    Type: AWS::Glue::Table
+    Properties:
+      CatalogId: !Ref AWS::AccountId
+      DatabaseName: !Ref myGlueDatabaseName
+      TableInput:
+        Name: from_cloudwatch_readready
+        TableType: EXTERNAL_TABLE
+        Parameters: {
+          "classification": "orc",
+          "notes": "demo",
+          "orc.compress": "ZLIB",
+          "partition_filtering.enabled": "true"
+        }
+        StorageDescriptor:
+          Location: !Sub s3://${myBucketNameForReadReadyCloudWatch}/${myPrefixForCloudWatch}
+          InputFormat: org.apache.hadoop.hive.ql.io.orc.OrcInputFormat
+          OutputFormat: org.apache.hadoop.hive.ql.io.orc.OrcOutputFormat
+          Columns:
+            - Name: logaccountid
+              Type: bigint     
+            - Name: loggroup
+              Type: string
+            - Name: logstream
+              Type: string
+            - Name: subscriptionfilters
+              Type: string
+            - Name: eventid
+              Type: string
+            - Name: eventdate 
+              Type: date
+            - Name: eventhour
+              Type: int
+            - Name: eventtime
+              Type: timestamp
+            - Name: message
+              Type: string
+            - Name: session
+              Type: string
+            - Name: eventowner
+              Type: string
+            - Name: f_theuser 
+              Type: string
+            - Name: f_activityid
+              Type: string
+            - Name: f_sessionid
+              Type: string
+            - Name: updated_time
+              Type: timestamp              
+          SerdeInfo:
+            SerializationLibrary: org.apache.hadoop.hive.ql.io.orc.OrcSerde
+        PartitionKeys:
+          - Name: logcalendarday
+            Type: int
+          - Name: loghour
+            Type: int
+Outputs:
+  FromCloudTrailReadReadyLocation:
+    Value: !Sub s3://${myBucketNameForReadReadyCloudTrail}/${myPrefixForCloudTrail}
+  FromCloudWatchReadReadyLocation:
+    Value: !Sub s3://${myBucketNameForReadReadyCloudWatch}/${myPrefixForCloudWatch}

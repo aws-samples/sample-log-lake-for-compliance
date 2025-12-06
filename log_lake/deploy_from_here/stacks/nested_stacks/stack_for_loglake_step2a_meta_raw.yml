@@ -1,0 +1,95 @@
+AWSTemplateFormatVersion : 2010-09-09
+Description: "Create metadata objects for Log Lake, including one Glue Database, and four Glue Tables (CloudTrail and CloudWatch raw tables, and CloudTrail and CloudWatch readready tables)"
+Parameters:
+  myGlueDatabaseName:
+    Type: String
+    Description: Glue database name to be created for LogLake.
+  myBucketNameForRawCloudTrail:
+    Type: String
+  myBucketNameForRawCloudWatch:
+    Type: String
+
+Resources:
+  LogLakeGlueDatabase:
+    Type: AWS::Glue::Database
+    Properties:
+      CatalogId: !Ref AWS::AccountId
+      DatabaseInput:
+        Name: !Ref myGlueDatabaseName
+  FromCloudTrailRawTable:
+    Type: AWS::Glue::Table
+    Properties:
+      CatalogId: !Ref AWS::AccountId
+      DatabaseName: !Ref LogLakeGlueDatabase
+      TableInput:
+        Name: from_cloudtrail_raw
+        TableType: EXTERNAL_TABLE
+        Parameters: {
+          "classification": "json",
+          "partition_filtering.enabled": "true",
+          "ignore.malformed.json":"true"
+        }
+        StorageDescriptor:
+          Location: !Sub s3://${myBucketNameForRawCloudTrail}/AWSLogs/
+          InputFormat: org.apache.hadoop.mapred.TextInputFormat
+          OutputFormat: org.apache.hadoop.hive.ql.io.HiveIgnoreKeyTextOutputFormat
+          Columns:
+            - Name: records
+              Type: array<struct<eventversion:string,useridentity:struct<type:string,principalid:string,arn:string,accountid:bigint,invokedby:string,username:string,sessioncontext:struct<sessionissuer:struct<type:string,principalid:string,arn:string,accountid:bigint,username:string>,attributes:struct<mfaauthenticated:string,creationdate:string>,sourceidentity:string>>,eventtime:string,eventsource:string,eventname:string,awsregion:string,sourceipaddress:string,useragent:string,errorcode:string,errormessage:string,requestparameters:string,responseelements:string,requestid:string,eventid:string,readonly:boolean,eventtype:string,managementevent:boolean,recipientaccountid:bigint,eventcategory:string,tlsdetails:struct<tlsversion:string,ciphersuite:string,clientprovidedhostheader:string>,sessioncredentialfromconsole:string>>
+          SerdeInfo:
+            SerializationLibrary: org.openx.data.jsonserde.JsonSerDe
+            Parameters: {}
+        PartitionKeys:
+          - Name: logaccountid
+            Type: bigint
+          - Name: logregion
+            Type: string
+          - Name: logyear
+            Type: int
+          - Name: logmon
+            Type: int
+          - Name: logday
+            Type: int
+  FromCloudWatchRawTable:
+    Type: AWS::Glue::Table
+    Properties:
+      CatalogId: !Ref AWS::AccountId
+      DatabaseName: !Ref LogLakeGlueDatabase
+      TableInput:
+        Name: from_cloudwatch_raw
+        TableType: EXTERNAL_TABLE
+        Parameters: {
+          "partition_filtering.enabled": "true"
+        }
+        StorageDescriptor:
+          Location: !Sub s3://${myBucketNameForRawCloudWatch}/AWSLogs/
+          InputFormat: org.apache.hadoop.mapred.TextInputFormat
+          OutputFormat: org.apache.hadoop.hive.ql.io.HiveIgnoreKeyTextOutputFormat
+          Columns:
+            - Name: everything
+              Type: string
+          SerdeInfo:
+            SerializationLibrary: org.apache.hadoop.hive.serde2.RegexSerDe
+            Parameters:
+              input.regex: "(.*)"
+        PartitionKeys:
+          - Name: logaccountid
+            Type: bigint
+          - Name: logyear
+            Type: int
+          - Name: logmon
+            Type: int
+          - Name: logday
+            Type: int
+          - Name: loghour
+            Type: int
+Outputs:
+  LogLakeGlueDatabase:
+    Description: "Glue Database Name"
+    Value: !Ref LogLakeGlueDatabase
+  FromCloudTrailRawTableName:
+    Description: "Table Name for FromCloudTrailRawTable"
+    Value: !Ref FromCloudTrailRawTable
+  FromCloudWatchRawTableName:
+    Description: "Table Name for FromCloudWatchRawTable"
+    Value: !Ref FromCloudWatchRawTable

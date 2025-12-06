@@ -1,0 +1,354 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Log Lake Part 3 CloudFormation Stack (Looker Lambda) - Lambda Function and Lambda IAM Role
+Parameters:
+  myLabel:
+    Type: String
+    Description: "Label is used to automate naming for new resources so stack author does not need to provide resource names for all resources. Resource names must still be provided for prereq resources such as supporting files bucket & key."
+    MinLength : "1"
+    MaxLength : "20"
+    AllowedPattern : "^[a-zA-Z-0-9]*$"
+    Default: "loglakeblog"
+  myNameForSensitiveGuardrail:
+    Type: String
+    Default: "for-looker-sensitive-data-guardrail"
+  myBucketNameForSupportingFiles:
+    Type: String
+    Description: "Bucket where code lives, that has the files used by lambdas"
+    Default: "as-loglakeblog-store-supporting-files"
+  myBucketNameForQueryResults:
+    Type: String
+    Description: "S3 Bucket for Athena Query Results. Obtain this value from the 'BucketNameForAthenaQueries' output in the StorageOnly CloudFormation stack deployment."
+    Default: "as-loglakeblog-store-athena-queries"
+  myEncryptKeyArnForSupportingFilesBucket:
+    Type: String
+    Description: "KMS Key ARN for Supporting Files bucket"
+    Default: ""
+  myEncryptKeyArnForLogLake:
+    Type: String
+    Description: "KMS Key ARN that was created during the 'step1_storageonly' stack. Obtain this value from the 'KeyArnForLogLake' output in the StorageOnly CloudFormation stack deployment."
+    Default: ""
+  myEncryptKeyForQueueIdOnly:
+    Type: String
+    Description: "KMS Key ID that was created during the 'step1_storageonly' stack. Obtain this value from the 'KeyIdForLogLake' output in the StorageOnly CloudFormation stack deployment."
+    Default: ""
+  myHandler:
+    Type: String
+    Description: "Handler for the Looker Lambda function"
+    Default: "lambda_function.lambda_handler"
+  myCodeForLookerFunction:
+    Type: String
+    Description: "S3 key for the Looker Lambda function code"
+    Default: "resources/files_for_looker_lambda.zip"
+  myBucketNameForRawBedrock:
+    Type: String
+    Description: "S3 Bucket name for raw Bedrock data. Obtain this value from the 'BucketNameForRawBedrock' output in the Bedrock CloudFormation stack deployment."
+    Default: "as-loglakeblog-store-bedrock-raw"
+  myBucketNameForReadReadyBedrock:
+    Type: String
+    Description: "S3 Bucket name for read-ready Bedrock data. Obtain this value from the 'BucketNameForReadReadyBedrock' output in the Bedrock CloudFormation stack deployment."
+    Default: "as-loglakeblog-store-bedrock-readready"
+  myGlueDatabaseName:
+    Type: String
+    Description: "Name of the Glue database containing Log Lake tables. This should match the database name used in your Log Lake deployment."
+    Default: "loglakeblog"
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label:
+          default: "General Configuration"
+        Parameters:
+          - myLabel
+      - Label:
+          default: "Bedrock Configuration"
+        Parameters:
+          - myNameForSensitiveGuardrail
+      - Label:
+          default: "Looker Lambda Configuration"
+        Parameters:
+          - myHandler
+          - myCodeForLookerFunction
+          - myEncryptKeyForQueueIdOnly
+          - myGlueDatabaseName
+      - Label:
+          default: "Bedrock Bucket Configuration"
+        Parameters:
+          - myBucketNameForRawBedrock
+          - myBucketNameForReadReadyBedrock
+          - myEncryptKeyArnForLogLake
+          - myBucketNameForSupportingFiles
+          - myEncryptKeyArnForSupportingFilesBucket
+          - myBucketNameForQueryResults
+    ParameterLabels:
+      myNameForSensitiveGuardrail:
+        default: "Sensitive Data Guardrail Name"
+      myLabel:
+        default: "Resource Naming Label"
+      myBucketNameForSupportingFiles:
+        default: "Supporting Files Bucket Name"
+      myBucketNameForQueryResults:
+        default: "Query Results Bucket Name"
+      myEncryptKeyArnForSupportingFilesBucket:
+        default: "KMS Key ARN for Supporting Files Bucket"
+      myEncryptKeyArnForLogLake:
+        default: "KMS Key ARN for Log Lake"
+      myHandler:
+        default: "Looker Lambda Handler"
+      myCodeForLookerFunction:
+        default: "Looker Lambda Code Path"
+      myBucketNameForRawBedrock:
+        default: "Raw Bedrock Bucket Name"
+      myBucketNameForReadReadyBedrock:
+        default: "Read-Ready Bedrock Bucket Name"
+      myEncryptKeyForQueueIdOnly:
+        default: "KMS Key ID for Log Lake (this will be configured on Lambda's SQS DLQ)"
+      myGlueDatabaseName:
+        default: "Glue Database Name"
+Resources:
+  BedrockGuardrailForSensitive:
+    Type: AWS::Bedrock::Guardrail
+    Properties:
+      Name: !Ref myNameForSensitiveGuardrail
+      Description: "Guardrail to filter sensitive data from Bedrock model responses in Looker"
+      BlockedInputMessaging: "Input contains sensitive information and has been blocked."
+      BlockedOutputsMessaging: "Response filtered to protect sensitive information."
+      SensitiveInformationPolicyConfig:
+        PiiEntitiesConfig:
+          - Action: BLOCK
+            Type: EMAIL
+          - Action: BLOCK
+            Type: PHONE
+          - Action: BLOCK
+            Type: US_SOCIAL_SECURITY_NUMBER
+          - Action: BLOCK
+            Type: CREDIT_DEBIT_CARD_NUMBER
+          - Action: BLOCK
+            Type: AWS_ACCESS_KEY
+          - Action: BLOCK
+            Type: AWS_SECRET_KEY
+          - Action: BLOCK
+            Type: IP_ADDRESS
+      Tags:
+        - Key: "Purpose"
+          Value: "LogLake-Looker-Security"
+  BedrockGuardrailVersion:
+    Type: AWS::Bedrock::GuardrailVersion
+    Properties:
+      GuardrailIdentifier: !Ref BedrockGuardrailForSensitive
+      Description: "Version 1 of sensitive data guardrail"
+  DeadLetterQueueForLooker:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub "as-${myLabel}-looker-lambda-dlq"
+      MessageRetentionPeriod: 1209600 # 14 days
+      KmsMasterKeyId: !Ref myEncryptKeyForQueueIdOnly
+  RoleForLookerLambda:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub as-${myLabel}-looker-lambda-role
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Action:
+              - "sts:AssumeRole"
+            Principal:
+              Service:
+                - "lambda.amazonaws.com"
+      Policies:
+        - PolicyName: allowBedrockGuardrails
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: BedrockGuardrailPermissions
+                Effect: Allow
+                Action:
+                  - bedrock:ApplyGuardrail
+                Resource: !Sub 'arn:${AWS::Partition}:bedrock:${AWS::Region}:${AWS::AccountId}:guardrail/*'
+        - PolicyName: allowLambdaLogs
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: CreateLogGroup
+                Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                Resource: !Sub 'arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:*'
+              - Sid: CreateInsertIntoLogStream
+                Effect: Allow
+                Action:
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: !Sub 'arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/*'
+        - PolicyName: allowSqsSendToDLQ
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: SendMessageToDLQ
+                Effect: Allow
+                Action:
+                  - sqs:SendMessage
+                Resource:
+                  - !GetAtt DeadLetterQueueForLooker.Arn
+        - PolicyName: allowEncryptKeyForQueueandLambda
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: EncryptDecryptQueueMessages
+                Effect: Allow
+                Action:
+                  - kms:Encrypt
+                  - kms:GenerateDataKey
+                  - kms:Decrypt
+                  - kms:DescribeKey
+                Resource:
+                  - !Ref myEncryptKeyArnForLogLake
+        - PolicyName: allowS3ReadLambdaCode
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: ReadLambdaDeploymentCode
+                Effect: Allow
+                Action:
+                  - s3:GetObject
+                Resource:
+                  - !Sub 'arn:${AWS::Partition}:s3:::${myBucketNameForSupportingFiles}/*'
+                Condition:
+                  StringEquals:
+                    "aws:ResourceAccount": !Ref AWS::AccountId
+        - PolicyName: allowS3ReadDataForAthena
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: ReadBedrockDataForAthenaQueries
+                Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:ListBucket
+                  - s3:GetBucketLocation
+                Resource:
+                  - !Sub 'arn:${AWS::Partition}:s3:::${myBucketNameForRawBedrock}'
+                  - !Sub 'arn:${AWS::Partition}:s3:::${myBucketNameForRawBedrock}/*'
+                  - !Sub 'arn:${AWS::Partition}:s3:::${myBucketNameForReadReadyBedrock}'
+                  - !Sub 'arn:${AWS::Partition}:s3:::${myBucketNameForReadReadyBedrock}/*'
+                  - !Sub 'arn:${AWS::Partition}:s3:::${myBucketNameForQueryResults}'
+                  - !Sub 'arn:${AWS::Partition}:s3:::${myBucketNameForQueryResults}/*'
+                Condition:
+                  StringEquals:
+                    "aws:ResourceAccount": !Ref AWS::AccountId
+        - PolicyName: allowS3WriteQueryResults
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: WriteAthenaQueryResults
+                Effect: Allow
+                Action:
+                  - s3:PutObject
+                  - s3:GetBucketLocation
+                Resource:
+                  - !Sub 'arn:${AWS::Partition}:s3:::${myBucketNameForQueryResults}'
+                  - !Sub 'arn:${AWS::Partition}:s3:::${myBucketNameForQueryResults}/*'
+                Condition:
+                  StringEquals:
+                    "aws:ResourceAccount": !Ref AWS::AccountId
+        - PolicyName: allowDecryptForSupportingFiles
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: DecryptSupportingFilesBucket
+                Effect: Allow
+                Action:
+                  - kms:DescribeKey
+                  - kms:Decrypt
+                Resource:
+                  - !Ref myEncryptKeyArnForSupportingFilesBucket
+        - PolicyName: allowEncryptKeyForBuckets
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: EncryptDecryptBuckets
+                Effect: Allow
+                Action:
+                  - kms:DescribeKey
+                  - kms:GenerateDataKey
+                  - kms:Encrypt
+                  - kms:Decrypt
+                Resource:
+                  - !Ref myEncryptKeyArnForLogLake
+        - PolicyName: allowBedrockModelInference
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: BedrockModelInferencePermissions
+                Effect: Allow
+                Action:
+                  - bedrock:InvokeModel
+                  - bedrock:InvokeModelWithResponseStream
+                Resource:
+                  - !Sub 'arn:${AWS::Partition}:bedrock:*::foundation-model/anthropic.claude-*'
+                  - !Sub 'arn:${AWS::Partition}:bedrock:*::foundation-model/us.anthropic.claude-*'
+                  - !Sub 'arn:${AWS::Partition}:bedrock:*:${AWS::AccountId}:inference-profile/*'
+        - PolicyName: blockMetadataMutating
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: blockMetadataMutating
+                Effect: Deny
+                Action:
+                  - glue:CreateDatabase
+                  - glue:UpdateDatabase
+                  - glue:DeleteDatabase
+                  - glue:CreateTable
+                  - glue:UpdateTable
+                  - glue:DeleteTable
+                  - glue:BatchDeleteTable 
+                  - glue:DeleteTableVersion
+                Resource: '*'
+        - PolicyName: readFromGlueCatalog
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: readFromGlue
+                Effect: Allow
+                Action:
+                  - glue:GetTable
+                  - glue:GetTables
+                  - glue:GetDatabase
+                  - glue:GetDatabases
+                  - glue:GetPartition
+                  - glue:GetPartitions
+                  - glue:BatchGetPartition
+                Resource:
+                  - !Sub 'arn:${AWS::Partition}:glue:${AWS::Region}:${AWS::AccountId}:catalog'
+                  - !Sub 'arn:${AWS::Partition}:glue:${AWS::Region}:${AWS::AccountId}:database/${myGlueDatabaseName}'
+                  - !Sub 'arn:${AWS::Partition}:glue:${AWS::Region}:${AWS::AccountId}:table/${myGlueDatabaseName}/*'
+        - PolicyName: allowAthenaQuery
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: allowAthenaQuery
+                Effect: Allow
+                Action:
+                  - athena:GetQueryExecution
+                  - athena:GetQueryResults
+                  - athena:StartQueryExecution
+                Resource: !Sub 'arn:${AWS::Partition}:athena:${AWS::Region}:${AWS::AccountId}:workgroup/primary'
+  LookerLambda:
+    Type: AWS::Lambda::Function
+    DependsOn: RoleForLookerLambda
+    Properties:
+      Handler: !Ref myHandler
+      Code:
+        S3Bucket: !Ref myBucketNameForSupportingFiles
+        S3Key: !Ref myCodeForLookerFunction
+      FunctionName: !Sub as-${myLabel}-looker-lambda
+      MemorySize: 256
+      Role: !GetAtt RoleForLookerLambda.Arn
+      Runtime: python3.12
+      Timeout: 90
+      Environment:
+        Variables:
+          GUARDRAIL_ARN: !GetAtt BedrockGuardrailForSensitive.GuardrailArn
+          ATHENA_OUTPUT_BUCKET: !Sub '${myBucketNameForQueryResults}'
+      ReservedConcurrentExecutions: 2
+      DeadLetterConfig:
+        TargetArn: !GetAtt DeadLetterQueueForLooker.Arn

@@ -1,0 +1,553 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Log Lake Part 3 CloudFormation Stack (Baseline Resources for Amazon Bedrock model invocation) - Glue Job, Two Bedrock Glue Tables, Two Bedrock S3 Buckets.
+# ============================================================================
+# IMPORTANT: DeletionPolicy is set to 'Delete' for all buckets to facilitate
+# testing and cleanup. For production deployments, change DeletionPolicy to
+# 'Retain' to prevent accidental data loss.
+#
+# Object Lock is enabled with GOVERNANCE mode (not COMPLIANCE) to allow
+# testing flexibility. Users with s3:BypassGovernanceRetention permission
+# can delete objects during testing. For production, consider COMPLIANCE mode.
+# ============================================================================
+Parameters:
+  myLabel:
+    Type: String
+    Description: "Label is used to automate naming for new resources so stack author does not need to provide resource names for all resources. Resource names must still be provided for prereq resources such as supporting files bucket & key."
+    MinLength : "1"
+    MaxLength : "20"
+    AllowedPattern : "^[a-zA-Z-0-9]*$"
+    Default: "loglakeblog"
+  myEncryptKeyArnForLogLake:
+    Type: String
+    Description: "KMS Key ARN that was created during the 'step1_storageonly' stack. Obtain this value from the 'KeyArnForLogLake' output in the StorageOnly CloudFormation stack deployment."
+    Default: ""
+  myS3RawLifecycleExpirationDays:
+    Type: Number
+    Description: "Number of days for S3 Lifecycle Rule"
+    Default: 999
+  myS3ReadReadyLifecycleExpirationDays:
+    Type: Number
+    Description: "Number of days for S3 Lifecycle Rule"
+    Default: 999
+  myRoleForBedrockGlueJob:
+    Type: String
+    Description: "ARN of Glue Job IAM role that was created during the 'step4_gluejobs' stack"
+    Default: "as-loglakeblog-glue-job-readready-rol"
+  myBucketNameForS3AccessLogs:
+    Type: String
+    Description: "S3 Bucket where S3 Access Logs are stored. Obtain this value from the 'BucketNameForAccessLogs' output in the StorageOnly CloudFormation stack deployment."
+    Default: "as-loglakeblog-store-access-logs"
+  myBucketNameForSupportingFiles:
+    Type: String
+    Description: "S3 Bucket where code lives, that has the files used by lambdas"
+    Default: "as-loglakeblog-store-supporting-files"
+  # Glue Job
+  myGlueDatabaseName:
+    Type: String
+    Description: "Glue database name that was created for LogLake"
+    Default: "loglakeblog"
+  myJobScriptForBedrock:
+    Type: String
+    Description: "Prefix under bucket for script (if uri is s3://mybucket/myfolder/myscript.py then use folder/myscript.py)"
+    Default: "resources/glue_driver_manyview_readready_for_bedrock.py"
+  myJobVersion:
+    Type: String
+    Default: 5.0
+  myJobMaxConcurrentRuns:
+    Type: Number
+    Description: "Set to 1 to avoid potential duplicate work, increase to allow horizontal scaling (separate instances)."
+    Default: 1
+  myJobTimeoutInMin:
+    Type: Number
+    Description: "Glue Job Timeout Duration (minutes)"
+    Default: 55
+  myJobWorkerType:
+    Type: String
+    Description: "Glue Job Worker Size"
+    Default: G.2X
+    AllowedValues:
+      - Standard
+      - G.1X
+      - G.2X
+      - G.4X
+      - G.8X
+      - G.025X
+  myJobNumOfWorkers:
+    Type: Number
+    Description: "Number of Glue Job Workers (required when specifying Glue Worker type)"
+    Default: 10
+  myBoundedExecutionNumOfRows:
+    Type: Number
+    MinValue: 1
+    MaxValue: 999999999
+    Default: 999999
+    Description: "The upper bound for the job, used for autobackfill & workload partitioning. Larger value means more workload for the job, and should be considered with worker type & count."
+  myGlueExtraJars:
+    Type: String
+    Description: "S3 Link to the JSON Serde."  
+    Default: s3://crawler-public/json/serde/json-serde.jar
+  myRelativeDaysBegin:
+    Description: "Relative days to set begin of bounded execution"
+    Type: Number
+    MinValue: 1
+    MaxValue: 999
+    Default: 444
+  myS3ObjectLockDefaultRetentionDays:
+    Type: Number
+    Description: "Number of days for S3 Object Lock default retention"
+    MinValue: 1
+    MaxValue: 365
+    Default: 7
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label:
+          default: "General Configuration"
+        Parameters:
+          - myLabel
+      - Label:
+          default: "Storage Configuration"
+        Parameters:
+          - myEncryptKeyArnForLogLake
+          - myS3RawLifecycleExpirationDays
+          - myS3ReadReadyLifecycleExpirationDays
+          - myBucketNameForSupportingFiles
+          - myBucketNameForS3AccessLogs
+          - myS3ObjectLockDefaultRetentionDays
+      - Label:
+          default: "Glue Role Configuration"
+        Parameters:
+          - myRoleForBedrockGlueJob
+      - Label:
+          default: "Glue Job Configuration"
+        Parameters:
+          - myGlueDatabaseName
+          - myJobScriptForBedrock
+          - myJobVersion
+          - myJobMaxConcurrentRuns
+          - myJobTimeoutInMin
+          - myJobWorkerType
+          - myJobNumOfWorkers
+          - myBoundedExecutionNumOfRows
+          - myGlueExtraJars
+          - myRelativeDaysBegin
+    ParameterLabels:
+      myLabel:
+        default: "Resource Naming Label"
+      myEncryptKeyArnForLogLake:
+        default: "KMS Key ARN for Log Lake"
+      myS3RawLifecycleExpirationDays:
+        default: "Raw Bucket Lifecycle Expiration (Days)"
+      myS3ReadReadyLifecycleExpirationDays:
+        default: "ReadReady Bucket Lifecycle Expiration (Days)"
+      myRoleForBedrockGlueJob:
+        default: "Glue Job Role ARN"
+      myBucketNameForS3AccessLogs:
+        default: "S3 Access Logs Bucket Name"
+      myBucketNameForSupportingFiles:
+        default: "Supporting Files Bucket Name"
+      myGlueDatabaseName:
+        default: "Glue Database Name"
+      myJobScriptForBedrock:
+        default: "Glue Job Script Path"
+      myJobVersion:
+        default: "Glue Version"
+      myJobMaxConcurrentRuns:
+        default: "Max Concurrent Job Runs"
+      myJobTimeoutInMin:
+        default: "Job Timeout (Minutes)"
+      myJobWorkerType:
+        default: "Worker Type"
+      myJobNumOfWorkers:
+        default: "Number of Workers"
+      myBoundedExecutionNumOfRows:
+        default: "Bounded Execution Row Limit"
+      myGlueExtraJars:
+        default: "Extra JAR Files"
+      myRelativeDaysBegin:
+        default: "Relative Days Begin"
+      myS3ObjectLockDefaultRetentionDays: 
+        default: "Object Lock Default Retention (days)"
+Resources:
+  StoreRawBedrockBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Delete # Set as Delete for testing, change to Retain when completed
+    Properties:
+      OwnershipControls:
+        Rules:
+          - ObjectOwnership: BucketOwnerEnforced
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              KMSMasterKeyID:
+                Ref: myEncryptKeyArnForLogLake
+              SSEAlgorithm: 'aws:kms'
+      BucketName: !Sub as-${myLabel}-store-bedrock-raw
+      LifecycleConfiguration:
+        Rules:
+          - Id: DeleteOldObjects
+            Status: Enabled
+            ExpirationInDays: !Ref myS3RawLifecycleExpirationDays
+      LoggingConfiguration:
+        DestinationBucketName: !Ref myBucketNameForS3AccessLogs
+        LogFilePrefix: !Sub 'access-logs/as-${myLabel}-store-bedrock-raw/'
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        IgnorePublicAcls: true
+        BlockPublicPolicy: true
+        RestrictPublicBuckets: true
+      VersioningConfiguration:
+        Status: Enabled
+      ObjectLockEnabled: true
+      ObjectLockConfiguration:
+        ObjectLockEnabled: Enabled
+        Rule:
+          DefaultRetention:
+            Mode: GOVERNANCE
+            Days: !Ref myS3ObjectLockDefaultRetentionDays
+  StoreRawBedrockBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket:
+        Ref: StoreRawBedrockBucket
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: AsSource
+            Effect: Allow
+            Principal:
+              AWS:
+                !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:root'
+            Action:
+              - 's3:Get*'
+              - 's3:List*'
+            Resource:
+              - !Sub 'arn:${AWS::Partition}:s3:::as-${myLabel}-store-bedrock-raw/*'
+              - !Sub 'arn:${AWS::Partition}:s3:::as-${myLabel}-store-bedrock-raw'
+          - Sid: DenyIncorrectEncryptionHeader
+            Effect: Deny
+            Principal: '*'
+            Action: 's3:PutObject'
+            Resource:
+              - !Sub 'arn:${AWS::Partition}:s3:::as-${myLabel}-store-bedrock-raw/*'
+            Condition:
+              StringEquals:
+                's3:x-amz-server-side-encryption': 'AES256'
+          - Sid: DenyNonHttpsConnections
+            Effect: Deny
+            Principal: '*'
+            Action:
+              - 's3:PutObject'
+              - 's3:GetObject'
+            Resource:
+              - !Sub 'arn:${AWS::Partition}:s3:::as-${myLabel}-store-bedrock-raw/*'
+            Condition:
+              Bool:
+                'aws:SecureTransport': false
+          - Sid: DenyPublicReadACL
+            Effect: Deny
+            Principal: '*'
+            Action:
+              - 's3:PutObject'
+              - 's3:PutObjectAcl'
+            Resource:
+              - !Sub 'arn:${AWS::Partition}:s3:::as-${myLabel}-store-bedrock-raw/*'
+            Condition:
+              StringEquals:
+                's3:x-amz-acl':
+                  - 'public-read'
+                  - 'public-read-write'
+                  - 'authenticated-read'
+          - Sid: DenyPublicReadGrant
+            Effect: Deny
+            Principal: '*'
+            Action:
+              - 's3:PutObject'
+              - 's3:PutObjectAcl'
+            Resource:
+              - !Sub 'arn:${AWS::Partition}:s3:::as-${myLabel}-store-bedrock-raw/*'
+            Condition:
+              StringLike:
+                's3:x-amz-grant-read':
+                  - '*http://acs.amazonaws.com/groups/global/AllUsers*'
+                  - '*http://acs.amazonaws.com/groups/global/AuthenticatedUsers*'
+  StoreReadReadyBedrockBucket:
+    Type: AWS::S3::Bucket
+    DependsOn: StoreRawBedrockBucket
+    DeletionPolicy: Delete # Set as Delete for testing, change to Retain when completed
+    Properties:
+      OwnershipControls:
+        Rules:
+          - ObjectOwnership: BucketOwnerEnforced
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              KMSMasterKeyID:
+                Ref: myEncryptKeyArnForLogLake
+              SSEAlgorithm: 'aws:kms'
+      BucketName: !Sub as-${myLabel}-store-bedrock-readready
+      LifecycleConfiguration:
+        Rules:
+          - Id: DeleteOldObjects
+            Status: Enabled
+            ExpirationInDays: !Ref myS3ReadReadyLifecycleExpirationDays
+      LoggingConfiguration:
+        DestinationBucketName: !Ref myBucketNameForS3AccessLogs
+        LogFilePrefix: !Sub 'access-logs/as-${myLabel}-store-bedrock-readready/'
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        IgnorePublicAcls: true
+        BlockPublicPolicy: true
+        RestrictPublicBuckets: true
+      VersioningConfiguration:
+        Status: Enabled
+      ObjectLockEnabled: true
+      ObjectLockConfiguration:
+        ObjectLockEnabled: Enabled
+        Rule:
+          DefaultRetention:
+            Mode: GOVERNANCE
+            Days: !Ref myS3ObjectLockDefaultRetentionDays
+  StoreReadReadyBedrockBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket:
+        Ref: StoreReadReadyBedrockBucket
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: DenyIncorrectEncryptionHeader
+            Effect: Deny
+            Principal: '*'
+            Action: 's3:PutObject'
+            Resource:
+              - !Sub 'arn:${AWS::Partition}:s3:::as-${myLabel}-store-bedrock-readready/*'
+            Condition:
+              StringEquals:
+                's3:x-amz-server-side-encryption': 'AES256'
+          - Sid: DenyNonHttpsConnections
+            Effect: Deny
+            Principal: '*'
+            Action:
+              - 's3:PutObject'
+              - 's3:GetObject'
+            Resource:
+              - !Sub 'arn:${AWS::Partition}:s3:::as-${myLabel}-store-bedrock-readready/*'
+            Condition:
+              Bool:
+                'aws:SecureTransport': false
+          - Sid: DenyPublicReadACL
+            Effect: Deny
+            Principal: '*'
+            Action:
+              - 's3:PutObject'
+              - 's3:PutObjectAcl'
+            Resource:
+              - !Sub 'arn:${AWS::Partition}:s3:::as-${myLabel}-store-bedrock-readready/*'
+            Condition:
+              StringEquals:
+                's3:x-amz-acl':
+                  - 'public-read'
+                  - 'public-read-write'
+                  - 'authenticated-read'
+          - Sid: DenyPublicReadGrant
+            Effect: Deny
+            Principal: '*'
+            Action:
+              - 's3:PutObject'
+              - 's3:PutObjectAcl'
+            Resource:
+              - !Sub 'arn:${AWS::Partition}:s3:::as-${myLabel}-store-bedrock-readready/*'
+            Condition:
+              StringLike:
+                's3:x-amz-grant-read':
+                  - '*http://acs.amazonaws.com/groups/global/AllUsers*'
+                  - '*http://acs.amazonaws.com/groups/global/AuthenticatedUsers*'
+  GlueSecurityConfiguration:
+    Type: AWS::Glue::SecurityConfiguration
+    Properties:
+      Name: !Sub "${AWS::StackName}-glue-security-config"
+      EncryptionConfiguration:
+        S3Encryptions:
+          - S3EncryptionMode: SSE-KMS
+            KmsKeyArn: !Ref myEncryptKeyArnForLogLake
+        CloudWatchEncryption:
+          CloudWatchEncryptionMode: SSE-KMS
+          KmsKeyArn: !Ref myEncryptKeyArnForLogLake
+        JobBookmarksEncryption:
+          JobBookmarksEncryptionMode: CSE-KMS
+          KmsKeyArn: !Ref myEncryptKeyArnForLogLake
+  GlueJobBedrock:
+    Type: AWS::Glue::Job
+    Properties:
+      Command:
+        Name: glueetl # must be glueetl for spark, pythonshell for python
+        ScriptLocation:
+          !Sub 's3://${myBucketNameForSupportingFiles}/${myJobScriptForBedrock}'
+      DefaultArguments:
+        "--job-language": python
+        "--enable-continuous-cloudwatch-log": "false"
+        "--enable-glue-datacatalog": true
+        "--extra-jars": !Ref myGlueExtraJars
+        "--limitForBoundedExecution": !Ref myBoundedExecutionNumOfRows
+        "--dbForLogLake": !Ref myGlueDatabaseName
+        "--relativeDaysBeginForBound": !Ref myRelativeDaysBegin
+        "--aws_region": !Ref AWS::Region
+        "--aws_account_id": !Ref AWS::AccountId
+        "--LocationOut": !Sub s3://as-${myLabel}-store-bedrock-readready/from_bedrock_readready/orc/
+      MaxRetries: 0
+      Name: !Sub as-${myLabel}-process-raw-to-readready-bedrock
+      Role: !Ref myRoleForBedrockGlueJob
+      Timeout: !Ref myJobTimeoutInMin
+      GlueVersion: !Ref myJobVersion
+      ExecutionProperty:
+        MaxConcurrentRuns: !Ref myJobMaxConcurrentRuns
+      WorkerType: !Ref myJobWorkerType
+      NumberOfWorkers: !Ref myJobNumOfWorkers
+      SecurityConfiguration: !Ref GlueSecurityConfiguration
+  # METADATA
+  FromBedrockRawTable:
+    DependsOn:
+      - StoreRawBedrockBucket
+    Type: AWS::Glue::Table
+    Properties:
+      CatalogId: !Ref AWS::AccountId
+      DatabaseName: !Ref myGlueDatabaseName
+      TableInput:
+        Name: from_bedrock_raw
+        TableType: EXTERNAL_TABLE
+        Parameters: {
+          "classification": "json",
+          "partition_filtering.enabled": "true",
+          "ignore.malformed.json":"true"
+        }
+        StorageDescriptor:
+          Location: !Sub s3://as-${myLabel}-store-bedrock-raw/AWSLogs/${AWS::AccountId}/BedrockModelInvocationLogs/
+          InputFormat: org.apache.hadoop.mapred.TextInputFormat
+          OutputFormat: org.apache.hadoop.hive.ql.io.HiveIgnoreKeyTextOutputFormat
+          Columns:
+            - Name: schemaType
+              Type: string
+            - Name: schemaVersion
+              Type: string
+            - Name: timestamp
+              Type: string
+            - Name: accountId
+              Type: string
+            - Name: identity
+              Type: struct<arn:string>
+            - Name: region
+              Type: string
+            - Name: requestId
+              Type: string
+            - Name: operation
+              Type: string
+            - Name: modelId
+              Type: string
+            - Name: input
+              Type: struct<inputContentType:string,inputBodyJson:struct<anthropic_version:string,max_tokens:int,messages:array<struct<role:string,content:string>>,tools:array<struct<name:string,description:string,input_schema:struct<type:string,properties:map<string,struct<type:string,description:string>>,required:array<string>>>>>,inputTokenCount:int>
+            - Name: output
+              Type: struct<outputContentType:string,outputBodyJson:struct<id:string,type:string,role:string,model:string,content:array<struct<type:string,text:string,id:string,name:string,input:map<string,string>>>,stop_reason:string,stop_sequence:string,usage:struct<input_tokens:int,cache_creation_input_tokens:int,cache_read_input_tokens:int,output_tokens:int>>,outputTokenCount:int>
+            - Name: inferenceRegion
+              Type: string
+          SerdeInfo:
+            SerializationLibrary: org.openx.data.jsonserde.JsonSerDe
+            Parameters:
+              "ignore.malformed.json": "true"
+        PartitionKeys:
+          - Name: logregion
+            Type: string
+          - Name: logyear
+            Type: int
+          - Name: logmon
+            Type: int
+          - Name: logday
+            Type: int
+          - Name: loghour
+            Type: int
+  FromBedrockReadReadyTable:
+    DependsOn:
+      - StoreReadReadyBedrockBucket
+    Type: AWS::Glue::Table
+    Properties:
+      CatalogId: !Ref AWS::AccountId
+      DatabaseName: !Ref myGlueDatabaseName
+      TableInput:
+        Name: from_bedrock_readready
+        TableType: EXTERNAL_TABLE
+        Parameters: {
+          "classification": "orc",
+          "notes": "demo",
+          "orc.compress": "ZLIB",
+          "partition_filtering.enabled": "true"
+        }
+        StorageDescriptor:
+          Location: !Sub s3://as-${myLabel}-store-bedrock-readready/from_bedrock_readready/orc/
+          InputFormat: org.apache.hadoop.hive.ql.io.orc.OrcInputFormat
+          OutputFormat: org.apache.hadoop.hive.ql.io.orc.OrcOutputFormat
+          Columns:
+            - Name: schematype
+              Type: string
+            - Name: schemaversion
+              Type: string
+            - Name: logaccountid
+              Type: bigint
+            - Name: request_time
+              Type: timestamp
+            - Name: requestid
+              Type: string
+            - Name: operation
+              Type: string
+            - Name: modelid
+              Type: string
+            - Name: input_messages
+              Type: string
+            - Name: input_tools
+              Type: string
+            - Name: input_inputtokencount
+              Type: int
+            - Name: input_orig
+              Type: string
+            - Name: output_outputbodyjson_id
+              Type: string
+            - Name: output_outputbodyjson_type
+              Type: string
+            - Name: output_outputbodyjson_role
+              Type: string
+            - Name: output_outputbodyjson_model
+              Type: string
+            - Name: output_outputbodyjson_content
+              Type: string
+            - Name: output_outputbodyjson_stopreason
+              Type: string
+            - Name: output_outputbodyjson_stopsequence
+              Type: string
+            - Name: output_outputtokencount
+              Type: int
+            - Name: output_orig
+              Type: string
+            - Name: awsregion
+              Type: string
+          SerdeInfo:
+            SerializationLibrary: org.apache.hadoop.hive.ql.io.orc.OrcSerde
+        PartitionKeys:
+          - Name: logcalendarday
+            Type: bigint
+          - Name: loghour
+            Type: int
+Outputs:
+  BucketArnForRawBedrock:
+    Description: ARN of the Bedrock Raw bucket
+    Value: !GetAtt StoreRawBedrockBucket.Arn
+  BucketArnForReadReadyBedrock:
+    Description: ARN of the Bedrock ReadReady bucket
+    Value: !GetAtt StoreReadReadyBedrockBucket.Arn
+  BucketNameForRawBedrock:
+    Description: Name of the Bedrock Raw bucket
+    Value: !Ref StoreRawBedrockBucket
+  BucketNameForReadReadyBedrock:
+    Description: Name of the Bedrock ReadReady bucket
+    Value: !Ref StoreReadReadyBedrockBucket
+  NameForBedrockGlueJob:
+    Description: Name of the Bedrock Glue job
+    Value: !Ref GlueJobBedrock

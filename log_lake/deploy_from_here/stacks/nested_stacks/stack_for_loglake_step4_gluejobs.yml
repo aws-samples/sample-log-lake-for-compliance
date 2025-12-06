@@ -1,0 +1,376 @@
+AWSTemplateFormatVersion : 2010-09-09
+Description: "Create the Glue jobs that read in from raw tables in the Glue catalog and write out to readready tables."
+# ============================================================================
+# IMPORTANT NOTES:
+# 
+# 1. KMS Key Requirements:
+#    The KMS key used for encryption (myEncryptKeyArnForGlueJobS3CloudWatch)
+#    must have a key policy that allows:
+#    - The Glue service principal (glue.amazonaws.com) to use it
+#    - The Glue job role to use it for job bookmarks encryption (CSE-KMS)
+#    - Actions: Decrypt, Encrypt, GenerateDataKey, CreateGrant, RetireGrant
+#
+# 2. Job Bookmarks Encryption:
+#    CSE-KMS (Client-Side Encryption with KMS) is used for job bookmarks.
+#    This requires the Glue role to have CreateGrant and RetireGrant permissions
+#    on the KMS key, which are included in the KMSPermissionsForJobBookmarks policy.
+#
+# 3. The output "AddThisJobRoleToExistingKeyPolicy" provides the role ARN
+#    that should be added to any existing KMS key policies if needed.
+# ============================================================================
+Parameters:
+  myCentralLakeAccountId:
+    Type: String
+  myCentralLakePartition: 
+    Type: String
+  myCentralLakeRegion:
+    Type: String
+  myBucketNameForQueryResults:
+    Type: String
+  myBucketNameForRawCloudTrail:
+    Type: String
+  myBucketNameForRawCloudWatch:
+    Type: String
+  myBucketNameForReadReadyCloudTrail:
+    Type: String
+  myBucketNameForReadReadyCloudWatch:
+    Type: String
+  myLocationForCloudTrail:
+    Type: String
+  myLocationForCloudWatch:
+    Type: String
+  myBucketNameForSupportingFiles:
+    Type: String
+  myEncryptKeyArnForSupportingFilesBucket:
+    Type: String
+  myEncryptKeyArnForRawBucket:
+    Type: String
+  myEncryptKeyArnForReadReadyBucket:
+    Type: String
+  myEncryptKeyArnForGlueJobS3CloudWatch:
+    Type: String
+  #addAPartAll
+  myHandler:
+    Type: String
+  myEncryptKeyForQueueIdOnly:
+    Type: String
+  # glue job
+  myRoleNameForGlueJob:
+    Type: String
+    Description: "Name of the Glue Job Role used by both jobs"
+  myGlueJobNameForCloudTrail:
+    Type: String
+    Description: "Name of the Glue Job for CloudTrail"
+  myGlueJobNameForCloudWatch:
+    Type: String
+    Description: "Name of the Glue Job for CloudWatch"
+  myGlueJobTriggerNameCloudTrailCloudWatch:
+    Type: String
+    Description: "Name of the CloudTrail and CloudWatch Glue Job Trigger"
+  myGlueDatabaseName:
+    Type: String
+  myJobTriggerSchedule:
+    Type: String
+    Description: "Schedule for the Glue Job Trigger"
+  myJobScriptForCloudTrail:
+    Type: String
+  myJobScriptForCloudWatch:
+    Type: String
+  myJobVersion:
+    Type: String
+  myJobMaxConcurrentRuns:
+    Type: Number
+  myJobTimeoutInMin:
+    Type: Number
+  myJobWorkerType:
+    Type: String
+  myJobNumOfWorkers:
+    Type: Number
+    Default: 10
+  myBoundedExecutionNumOfRows:
+    Type: Number
+  myGlueExtraJars:
+    Type: String
+  myRelativeDaysBegin:
+    Type: Number
+Resources:
+  GlueSecurityConfiguration:
+    Type: AWS::Glue::SecurityConfiguration
+    Properties:
+      Name: !Sub "${AWS::StackName}-glue-security-config"
+      EncryptionConfiguration:
+        S3Encryptions:
+          - S3EncryptionMode: SSE-KMS
+            KmsKeyArn: !Ref myEncryptKeyArnForGlueJobS3CloudWatch
+        CloudWatchEncryption:
+          CloudWatchEncryptionMode: SSE-KMS
+          KmsKeyArn: !Ref myEncryptKeyArnForGlueJobS3CloudWatch
+        JobBookmarksEncryption:
+          JobBookmarksEncryptionMode: CSE-KMS
+          KmsKeyArn: !Ref myEncryptKeyArnForGlueJobS3CloudWatch
+  RoleForGlueJob:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Ref myRoleNameForGlueJob
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Action:
+              - "sts:AssumeRole"
+            Principal:
+              Service:
+                - "glue.amazonaws.com"
+            Condition:
+              StringEquals:
+                "aws:SourceAccount": !Ref AWS::AccountId
+              ArnLike:
+                "aws:SourceArn": !Sub "arn:${AWS::Partition}:glue:${AWS::Region}:${AWS::AccountId}:*"
+      Policies:
+        # block injection of objects from within job
+        - PolicyName: DenyDroppingDatabase
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: blockMetadataMutating
+                Effect: Deny
+                Action:
+                  - glue:CreateTable
+                  - glue:DeleteTable
+                  - glue:BatchDeleteTable
+                  - glue:CreateDatabase
+                  - glue:DeleteDatabase
+                  - glue:UpdateDatabase
+                  - glue:DeleteTableVersion
+                Resource:
+                  - '*'
+        - PolicyName: readFromGlueCatalog
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - glue:GetTable
+                  - glue:GetTables
+                  - glue:GetDatabase
+                  - glue:GetDatabases
+                  - glue:GetPartition
+                  - glue:GetPartitions
+                  - glue:BatchGetPartition
+                  - glue:UpdateTable
+                  - glue:BatchCreatePartition
+                  - glue:CreatePartition
+                  - glue:UpdatePartition
+                  - glue:DeletePartition
+                  - glue:BatchDeletePartition
+                  - glue:GetJobBookmark
+                  - glue:UpdateJobBookmark
+                  - glue:ResetJobBookmark
+                Resource:
+                  - !Sub 'arn:${AWS::Partition}:glue:${AWS::Region}:${AWS::AccountId}:catalog'
+                  - !Sub 'arn:${AWS::Partition}:glue:${AWS::Region}:${AWS::AccountId}:database/*'
+                  - !Sub 'arn:${AWS::Partition}:glue:${AWS::Region}:${AWS::AccountId}:table/*'
+                  - !Sub 'arn:${myCentralLakePartition}:glue:${myCentralLakeRegion}:${myCentralLakeAccountId}:catalog'
+                  - !Sub 'arn:${myCentralLakePartition}:glue:${myCentralLakeRegion}:${myCentralLakeAccountId}:database/*'
+                  - !Sub 'arn:${myCentralLakePartition}:glue:${myCentralLakeRegion}:${myCentralLakeAccountId}:table/*'
+        - PolicyName: KMSPermissionsForJobBookmarks
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: AllowJobBookmarksEncryption
+                Effect: Allow
+                Action:
+                  - kms:Decrypt
+                  - kms:Encrypt
+                  - kms:GenerateDataKey
+                  - kms:GenerateDataKeyWithoutPlaintext
+                  - kms:DescribeKey
+                  - kms:CreateGrant
+                  - kms:RetireGrant
+                Resource:
+                  - !Ref myEncryptKeyArnForGlueJobS3CloudWatch
+        - PolicyName: EncryptingKeyPermissionsForWrite
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - kms:Encrypt
+                  - kms:GenerateDataKey*
+                Resource: 
+                  - !Ref myEncryptKeyArnForReadReadyBucket
+                Condition:
+                  StringEquals:
+                    'aws:ResourceAccount': !Ref AWS::AccountId
+        - PolicyName: EncryptingKeyPermissionsForReadOnly
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - kms:Decrypt
+                  - kms:DescribeKey
+                Resource: 
+                  - !Ref myEncryptKeyArnForSupportingFilesBucket
+                  - !Ref myEncryptKeyArnForRawBucket
+                  - !Ref myEncryptKeyArnForReadReadyBucket
+        - PolicyName: BuiltInLogging
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: CloudWatchLogsPermissions
+                Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                  - logs:AssociateKmsKey
+                  - cloudwatch:PutMetricData
+                Resource: 
+                  - !Sub 'arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws-glue/*'
+                  - !Sub 'arn:${AWS::Partition}:cloudwatch:${AWS::Region}:${AWS::AccountId}:*'
+        - PolicyName: ReadFromBuckets
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: SourceBucketsForRead
+                Effect: Allow
+                Action:
+                  - 's3:GetBucketLocation'
+                  - 's3:GetObject'
+                  - 's3:ListBucket'
+                Resource:
+                  - !Sub 'arn:${AWS::Partition}:s3:::${myBucketNameForRawCloudTrail}'
+                  - !Sub 'arn:${AWS::Partition}:s3:::${myBucketNameForRawCloudTrail}/*'
+                  - !Sub 'arn:${AWS::Partition}:s3:::${myBucketNameForReadReadyCloudTrail}'
+                  - !Sub 'arn:${AWS::Partition}:s3:::${myBucketNameForReadReadyCloudTrail}/*'
+                  - !Sub 'arn:${AWS::Partition}:s3:::${myBucketNameForRawCloudWatch}'
+                  - !Sub 'arn:${AWS::Partition}:s3:::${myBucketNameForRawCloudWatch}/*'
+                  - !Sub 'arn:${AWS::Partition}:s3:::${myBucketNameForReadReadyCloudWatch}'
+                  - !Sub 'arn:${AWS::Partition}:s3:::${myBucketNameForReadReadyCloudWatch}/*'
+                  - !Sub 'arn:${AWS::Partition}:s3:::${myBucketNameForSupportingFiles}'
+                  - !Sub 'arn:${AWS::Partition}:s3:::${myBucketNameForSupportingFiles}/*'
+                  - !Sub 'arn:${AWS::Partition}:s3:::${myBucketNameForQueryResults}'
+                  - !Sub 'arn:${AWS::Partition}:s3:::${myBucketNameForQueryResults}/*'
+        - PolicyName: WriteToBucketsForReadReady
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: TargetBucketsForWrite  
+                Effect: Allow
+                Action:
+                  - s3:PutObject
+                  - s3:DeleteObject
+                Resource:
+                  - !Sub 'arn:${AWS::Partition}:s3:::${myBucketNameForReadReadyCloudTrail}'
+                  - !Sub 'arn:${AWS::Partition}:s3:::${myBucketNameForReadReadyCloudTrail}/*'
+                  - !Sub 'arn:${AWS::Partition}:s3:::${myBucketNameForReadReadyCloudWatch}'
+                  - !Sub 'arn:${AWS::Partition}:s3:::${myBucketNameForReadReadyCloudWatch}/*'
+                  - !Sub 'arn:${AWS::Partition}:s3:::${myBucketNameForQueryResults}'
+                  - !Sub 'arn:${AWS::Partition}:s3:::${myBucketNameForQueryResults}/*'
+        - PolicyName: CopiedFromGlueServiceRoleRead
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                Resource:
+                  - "arn:aws:s3:::crawler-public*"
+                  - "arn:aws:s3:::aws-glue-*"
+                  - "arn:aws:s3:::*/*aws-glue-*/*"
+        - PolicyName: CopiedFromGlueServiceRoleWrite
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:PutObject
+                  - s3:DeleteObject
+                Resource:
+                  - "arn:aws:s3:::aws-glue-*"
+                  - "arn:aws:s3:::*/*aws-glue-*/*"            
+        - PolicyName: CopiedFromGlueServiceRoleCreate
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:CreateBucket
+                Resource:
+                  - "arn:aws:s3:::aws-glue-*"
+  GlueJobCloudTrail:
+    Type: AWS::Glue::Job
+    Properties:
+      Command:
+        Name: glueetl # must be glueetl for spark, pythonshell for python
+        ScriptLocation:
+          !Sub 's3://${myBucketNameForSupportingFiles}/${myJobScriptForCloudTrail}'
+      DefaultArguments:
+        "--job-language": python
+        "--enable-continuous-cloudwatch-log": "false"
+        "--enable-glue-datacatalog": true
+        "--extra-jars": !Ref myGlueExtraJars
+        "--limitForBoundedExecution": !Ref myBoundedExecutionNumOfRows
+        "--dbForLogLake": !Ref myGlueDatabaseName
+        "--relativeDaysBeginForBound": !Ref myRelativeDaysBegin
+        "--aws_region": !Ref AWS::Region
+        "--aws_account_id": !Ref AWS::AccountId
+        "--LocationOut": !Ref myLocationForCloudTrail
+      MaxRetries: 0
+      Name: !Ref myGlueJobNameForCloudTrail
+      Role: !Ref RoleForGlueJob
+      Timeout: !Ref myJobTimeoutInMin
+      GlueVersion: !Ref myJobVersion
+      ExecutionProperty:
+        MaxConcurrentRuns: !Ref myJobMaxConcurrentRuns
+      WorkerType: !Ref myJobWorkerType
+      NumberOfWorkers: !Ref myJobNumOfWorkers
+      SecurityConfiguration: !Ref GlueSecurityConfiguration
+  GlueJobCloudWatch:
+    Type: AWS::Glue::Job
+    Properties:
+      Command:
+        Name: glueetl # must be glueetl for spark, pythonshell for python
+        ScriptLocation:
+          !Sub 's3://${myBucketNameForSupportingFiles}/${myJobScriptForCloudWatch}'
+      DefaultArguments:
+        "--job-language": python
+        "--enable-continuous-cloudwatch-log": "false"
+        "--enable-glue-datacatalog": true
+        "--extra-jars": !Ref myGlueExtraJars
+        "--limitForBoundedExecution": !Ref myBoundedExecutionNumOfRows
+        "--dbForLogLake": !Ref myGlueDatabaseName
+        "--relativeDaysBeginForBound": !Ref myRelativeDaysBegin
+        "--aws_region": !Ref AWS::Region
+        "--aws_account_id": !Ref AWS::AccountId
+        "--LocationOut": !Ref myLocationForCloudWatch
+      MaxRetries: 0
+      Name: !Ref myGlueJobNameForCloudWatch
+      Role: !Ref RoleForGlueJob
+      Timeout: !Ref myJobTimeoutInMin
+      GlueVersion: !Ref myJobVersion
+      ExecutionProperty:
+        MaxConcurrentRuns: !Ref myJobMaxConcurrentRuns
+      WorkerType: !Ref myJobWorkerType
+      NumberOfWorkers: !Ref myJobNumOfWorkers
+      SecurityConfiguration: !Ref GlueSecurityConfiguration
+  ScheduledJobTrigger:
+    Type: AWS::Glue::Trigger
+    Properties:
+      Name: myGlueJobTriggerNameCloudTrailCloudWatch
+      Type: SCHEDULED
+      Description: DESCRIPTION_SCHEDULED
+      Schedule: !Sub ${myJobTriggerSchedule}
+      StartOnCreation: False
+      Actions:
+        - JobName: !Ref GlueJobCloudTrail
+          Arguments:
+            '--job-bookmark-option': job-bookmark-enable
+        - JobName: !Ref GlueJobCloudWatch
+          Arguments:
+            '--job-bookmark-option': job-bookmark-enable
+Outputs:
+  AddThisJobRoleToExistingKeyPolicy:
+    Description: "Existing key policy must allow Glue job to do generate, describe, decrypt"
+    Value: !GetAtt RoleForGlueJob.Arn

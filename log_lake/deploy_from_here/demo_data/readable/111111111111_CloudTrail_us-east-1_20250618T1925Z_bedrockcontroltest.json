@@ -1,0 +1,108 @@
+{
+    "Records": [
+        {
+            "eventVersion": "1.11",
+            "userIdentity": {
+                "type": "AssumedRole",
+                "principalId": "SOMEPRINCIPALID:createBedrockModelInvocationLogsWTool",
+                "arn": "arn:aws:sts::111111111111:assumed-role/createBedrockModelInvocationLogsWTool-role-j39nuuy3/createBedrockModelInvocationLogsWTool",
+                "accountId": "111111111111",
+                "accessKeyId": "SOMEKEY",
+                "sessionContext": {
+                    "sessionIssuer": {
+                        "type": "Role",
+                        "principalId": "SOMEPRINCIPALID",
+                        "arn": "arn:aws:iam::111111111111:role/service-role/createBedrockModelInvocationLogsWTool-role-j39nuuy3",
+                        "accountId": "111111111111",
+                        "userName": "createBedrockModelInvocationLogsWTool-role-j39nuuy3"
+                    },
+                    "attributes": {
+                        "creationDate": "2025-06-18T19:18:58Z",
+                        "mfaAuthenticated": "false"
+                    }
+                },
+                "inScopeOf": {
+                    "issuerType": "AWS::Lambda::Function",
+                    "credentialsIssuedTo": "arn:aws:lambda:us-east-1:111111111111:function:createBedrockModelInvocationLogsWTool"
+                }
+            },
+            "eventTime": "2025-06-18T19:19:03Z",
+            "eventSource": "bedrock.amazonaws.com",
+            "eventName": "InvokeModel",
+            "awsRegion": "us-east-1",
+            "sourceIPAddress": "3.237.26.61",
+            "userAgent": "Boto3/1.35.92 md/Botocore#1.35.92 ua/2.0 os/linux#5.10.236-249.934.amzn2.x86_64 md/arch#x86_64 lang/python#3.13.3 md/pyimpl#CPython exec-env/AWS_Lambda_python3.13 cfg/retry-mode#legacy Botocore/1.35.92",
+            "requestParameters": {
+                "modelId": "us.anthropic.claude-3-7-sonnet-20250219-v1:0"
+            },
+            "responseElements": null,
+            "additionalEventData": {
+                "inferenceRegion": "us-west-2"
+            },
+            "requestID": "f1b169e0-f596-4749-b13d-05c4b2569f1f",
+            "eventID": "b8d2c383-5c17-4888-b373-5ba7b2c1401e",
+            "readOnly": true,
+            "eventType": "AwsApiCall",
+            "managementEvent": true,
+            "recipientAccountId": "111111111111",
+            "eventCategory": "Management",
+            "tlsDetails": {
+                "tlsVersion": "TLSv1.3",
+                "cipherSuite": "TLS_AES_128_GCM_SHA256",
+                "clientProvidedHostHeader": "bedrock-runtime.us-east-1.amazonaws.com"
+            }
+        },
+        {
+            "eventVersion": "1.11",
+            "userIdentity": {
+                "type": "AssumedRole",
+                "principalId": "SOMEPRINCIPALID:createBedrockModelInvocationLogsWTool",
+                "arn": "arn:aws:sts::111111111111:assumed-role/createBedrockModelInvocationLogsWTool-role-j39nuuy3/createBedrockModelInvocationLogsWTool",
+                "accountId": "111111111111",
+                "accessKeyId": "SOMEKEY",
+                "sessionContext": {
+                    "sessionIssuer": {
+                        "type": "Role",
+                        "principalId": "SOMEPRINCIPALID",
+                        "arn": "arn:aws:iam::111111111111:role/service-role/createBedrockModelInvocationLogsWTool-role-j39nuuy3",
+                        "accountId": "111111111111",
+                        "userName": "createBedrockModelInvocationLogsWTool-role-j39nuuy3"
+                    },
+                    "attributes": {
+                        "creationDate": "2025-06-18T19:18:58Z",
+                        "mfaAuthenticated": "false"
+                    }
+                },
+                "inScopeOf": {
+                    "issuerType": "AWS::Lambda::Function",
+                    "credentialsIssuedTo": "arn:aws:lambda:us-east-1:111111111111:function:createBedrockModelInvocationLogsWTool"
+                }
+            },
+            "eventTime": "2025-06-18T19:19:14Z",
+            "eventSource": "bedrock.amazonaws.com",
+            "eventName": "InvokeModel",
+            "awsRegion": "us-east-1",
+            "sourceIPAddress": "3.237.26.61",
+            "userAgent": "Boto3/1.35.92 md/Botocore#1.35.92 ua/2.0 os/linux#5.10.236-249.934.amzn2.x86_64 md/arch#x86_64 lang/python#3.13.3 md/pyimpl#CPython exec-env/AWS_Lambda_python3.13 cfg/retry-mode#legacy Botocore/1.35.92",
+            "requestParameters": {
+                "modelId": "us.anthropic.claude-3-7-sonnet-20250219-v1:0"
+            },
+            "responseElements": null,
+            "additionalEventData": {
+                "inferenceRegion": "us-west-2"
+            },
+            "requestID": "e2568f19-826a-44fc-9e7f-41749565269b",
+            "eventID": "52811048-dcf0-4643-a223-ebf9d1ab8060",
+            "readOnly": true,
+            "eventType": "AwsApiCall",
+            "managementEvent": true,
+            "recipientAccountId": "111111111111",
+            "eventCategory": "Management",
+            "tlsDetails": {
+                "tlsVersion": "TLSv1.3",
+                "cipherSuite": "TLS_AES_128_GCM_SHA256",
+                "clientProvidedHostHeader": "bedrock-runtime.us-east-1.amazonaws.com"
+            }
+        }
+    ]
+}

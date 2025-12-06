@@ -1,0 +1,779 @@
+AWSTemplateFormatVersion : 2010-09-09
+Description: "Create AWS resources for Log Lake (storage/buckets only)"
+# ============================================================================
+# IMPORTANT: DeletionPolicy is set to 'Delete' for all buckets to facilitate
+# testing and cleanup. For production deployments, change DeletionPolicy to
+# 'Retain' to prevent accidental data loss.
+#
+# Object Lock is enabled with GOVERNANCE mode (not COMPLIANCE) to allow
+# testing flexibility. Users with s3:BypassGovernanceRetention permission
+# can delete objects during testing. For production, consider COMPLIANCE mode.
+# ============================================================================
+Parameters:
+  myBucketNameForRawCloudTrail:
+    Type: String
+  myBucketNameForRawCloudWatch:
+    Type: String
+  myBucketNameForReadReadyCloudTrail:
+    Type: String
+  myBucketNameForReadReadyCloudWatch:
+    Type: String
+  myKMSKeyAlias:
+    Type: String
+  myS3RawLifecycleExpirationDays:
+    Type: Number
+  myS3ReadReadyLifecycleExpirationDays:
+    Type: Number
+  myBucketNameForAccessLogs:
+    Type: String
+  myS3AccessLogsLifecycleExpirationDays:
+    Type: Number
+  myBucketNameForAthenaQueries:
+    Type: String
+  myS3AthenaQueriesLifecycleExpirationDays:
+    Type: Number
+  myS3ObjectLockDefaultRetentionDays:
+    Type: Number
+Resources:
+  EncryptKeyForLogLake:
+    Type: 'AWS::KMS::Key'
+    DeletionPolicy: Retain
+    Properties:
+      Description: 'KMS key policy for LogLake queue bucket queries'
+      Enabled: true
+      EnableKeyRotation: true
+      KeyPolicy:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: "Enable IAM User Permissions"
+            Effect: Allow
+            Principal:
+              AWS: !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:root'
+            Action:
+              - 'kms:*'
+            Resource: '*'
+          - Sid: "Allow-S3-Access"
+            Effect: Allow
+            Principal:
+              Service: s3.amazonaws.com
+            Action:
+              - 'kms:ReEncrypt*'
+              - 'kms:GenerateDataKey*'
+              - 'kms:Encrypt'
+              - 'kms:DescribeKey'
+              - 'kms:Decrypt'
+            Resource: '*'
+          - Sid: "Allow-S3-Logging-Service"
+            Effect: Allow
+            Principal:
+              Service: logging.s3.amazonaws.com
+            Action:
+              - 'kms:GenerateDataKey'
+              - 'kms:Decrypt'
+            Resource: '*'
+            Condition:
+              StringEquals:
+                'aws:SourceAccount': !Ref 'AWS::AccountId'
+          - Sid: "Allow-Glue-Access"
+            Effect: Allow
+            Principal:
+              Service: glue.amazonaws.com
+            Action:
+            - 'kms:Decrypt'
+            - 'kms:Encrypt'
+            - 'kms:GenerateDataKey'
+            - 'kms:GenerateDataKeyWithoutPlaintext'
+            - 'kms:DescribeKey'
+            - 'kms:CreateGrant'
+            - 'kms:RetireGrant'
+            Resource: '*'
+            Condition:
+              StringEquals:
+                'aws:SourceAccount': !Ref 'AWS::AccountId'
+          - Sid: "Allow-CloudWatch-Logs-With-Context"
+            Effect: Allow
+            Principal:
+              Service: !Sub 'logs.${AWS::Region}.amazonaws.com'
+            Action:
+              - 'kms:Encrypt'
+              - 'kms:Decrypt'
+              - 'kms:ReEncrypt*'
+              - 'kms:GenerateDataKey*'
+              - 'kms:CreateGrant'
+            Resource: '*'
+            Condition:
+              ArnLike:
+                'kms:EncryptionContext:aws:logs:arn': !Sub 'arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws-glue/jobs/*'
+          - Sid: "Allow-CloudWatch-Logs-DescribeKey"
+            Effect: Allow
+            Principal:
+              Service: !Sub 'logs.${AWS::Region}.amazonaws.com'
+            Action:
+              - 'kms:DescribeKey'
+            Resource: '*'
+            Condition:
+              StringEquals:
+                'aws:SourceAccount': !Ref 'AWS::AccountId'
+  KeyAliasForLogLakeS3:
+    Type: 'AWS::KMS::Alias'
+    Properties:
+      AliasName: !Sub alias/${myKMSKeyAlias}
+      TargetKeyId:
+        Ref: EncryptKeyForLogLake
+  StoreRawCloudTrailCopiesBucket:
+    Type: AWS::S3::Bucket
+    DependsOn: S3AccessLogsBucket
+    DeletionPolicy: Delete # Set as Delete for testing, change to Retain when completed
+    Properties:
+      OwnershipControls:
+        Rules:
+          - ObjectOwnership: BucketOwnerEnforced
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              KMSMasterKeyID:
+                Ref: EncryptKeyForLogLake
+              SSEAlgorithm: 'aws:kms'
+      BucketName: !Ref myBucketNameForRawCloudTrail
+      LifecycleConfiguration:
+        Rules:
+          - Id: DeleteOldObjects
+            Status: Enabled
+            ExpirationInDays: !Ref myS3RawLifecycleExpirationDays
+      LoggingConfiguration:
+        DestinationBucketName: !Ref S3AccessLogsBucket
+        LogFilePrefix: !Sub 'access-logs/${myBucketNameForRawCloudTrail}/'
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        IgnorePublicAcls: true
+        BlockPublicPolicy: true
+        RestrictPublicBuckets: true
+      VersioningConfiguration:
+        Status: Enabled
+      ObjectLockEnabled: true
+      ObjectLockConfiguration:
+        ObjectLockEnabled: Enabled
+        Rule:
+          DefaultRetention:
+            Mode: GOVERNANCE
+            Days: !Ref myS3ObjectLockDefaultRetentionDays
+  StoreRawCloudTrailCopiesBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket:
+        Ref: StoreRawCloudTrailCopiesBucket
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: AsSource
+            Effect: Allow
+            Principal:
+              AWS:
+                !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:root'
+            Action:
+              - 's3:Get*'
+              - 's3:List*'
+            Resource:
+              - !Sub 'arn:${AWS::Partition}:s3:::${myBucketNameForRawCloudTrail}/*'
+              - !Sub 'arn:${AWS::Partition}:s3:::${myBucketNameForRawCloudTrail}'
+          - Sid: DenyIncorrectEncryptionHeader
+            Effect: Deny
+            Principal: '*'
+            Action: 's3:PutObject'
+            Resource:
+              - !Sub 'arn:${AWS::Partition}:s3:::${myBucketNameForRawCloudTrail}/*'
+            Condition:
+              StringEquals:
+                's3:x-amz-server-side-encryption': 'AES256'
+          - Sid: DenyNonHttpsConnections
+            Effect: Deny
+            Principal: '*'
+            Action:
+              - 's3:PutObject'
+              - 's3:GetObject'
+            Resource:
+              - !Sub 'arn:${AWS::Partition}:s3:::${myBucketNameForRawCloudTrail}/*'
+            Condition:
+              Bool:
+                'aws:SecureTransport': false
+          - Sid: DenyPublicReadACL
+            Effect: Deny
+            Principal: '*'
+            Action:
+              - 's3:PutObject'
+              - 's3:PutObjectAcl'
+            Resource:
+              - !Sub 'arn:${AWS::Partition}:s3:::${myBucketNameForRawCloudTrail}/*'
+            Condition:
+              StringEquals:
+                's3:x-amz-acl':
+                  - 'public-read'
+                  - 'public-read-write'
+                  - 'authenticated-read'
+          - Sid: DenyPublicReadGrant
+            Effect: Deny
+            Principal: '*'
+            Action:
+              - 's3:PutObject'
+              - 's3:PutObjectAcl'
+            Resource:
+              - !Sub 'arn:${AWS::Partition}:s3:::${myBucketNameForRawCloudTrail}/*'
+            Condition:
+              StringLike:
+                's3:x-amz-grant-read':
+                  - '*http://acs.amazonaws.com/groups/global/AllUsers*'
+                  - '*http://acs.amazonaws.com/groups/global/AuthenticatedUsers*'
+  StoreRawCloudWatchCopiesBucket:
+    Type: AWS::S3::Bucket
+    DependsOn: S3AccessLogsBucket
+    DeletionPolicy: Delete # Set as Delete for testing, change to Retain when completed
+    Properties:
+      OwnershipControls:
+        Rules:
+          - ObjectOwnership: BucketOwnerEnforced
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              KMSMasterKeyID:
+                Ref: EncryptKeyForLogLake
+              SSEAlgorithm: 'aws:kms'
+      BucketName: !Ref myBucketNameForRawCloudWatch
+      LifecycleConfiguration:
+        Rules:
+          - Id: DeleteOldObjects
+            Status: Enabled
+            ExpirationInDays: !Ref myS3RawLifecycleExpirationDays
+      LoggingConfiguration:
+        DestinationBucketName: !Ref S3AccessLogsBucket
+        LogFilePrefix: !Sub 'access-logs/${myBucketNameForRawCloudWatch}/'
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        IgnorePublicAcls: true
+        BlockPublicPolicy: true
+        RestrictPublicBuckets: true
+      VersioningConfiguration:
+        Status: Enabled
+      ObjectLockEnabled: true
+      ObjectLockConfiguration:
+        ObjectLockEnabled: Enabled
+        Rule:
+          DefaultRetention:
+            Mode: GOVERNANCE
+            Days: !Ref myS3ObjectLockDefaultRetentionDays
+  StoreRawCloudWatchCopiesBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket:
+        Ref: StoreRawCloudWatchCopiesBucket
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: AsSource
+            Effect: Allow
+            Principal:
+              AWS:
+                !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:root'
+            Action:
+              - 's3:Get*'
+              - 's3:List*'
+            Resource:
+              - !Sub 'arn:${AWS::Partition}:s3:::${myBucketNameForRawCloudWatch}/*'
+              - !Sub 'arn:${AWS::Partition}:s3:::${myBucketNameForRawCloudWatch}'
+          - Sid: DenyIncorrectEncryptionHeader
+            Effect: Deny
+            Principal: '*'
+            Action: 's3:PutObject'
+            Resource:
+              - !Sub 'arn:${AWS::Partition}:s3:::${myBucketNameForRawCloudWatch}/*'
+            Condition:
+              StringEquals:
+                's3:x-amz-server-side-encryption': 'AES256'
+          - Sid: DenyNonHttpsConnections
+            Effect: Deny
+            Principal: '*'
+            Action:
+              - 's3:PutObject'
+              - 's3:GetObject'
+            Resource:
+              - !Sub 'arn:${AWS::Partition}:s3:::${myBucketNameForRawCloudWatch}/*'
+            Condition:
+              Bool:
+                'aws:SecureTransport': false
+          - Sid: DenyPublicReadACL
+            Effect: Deny
+            Principal: '*'
+            Action:
+              - 's3:PutObject'
+              - 's3:PutObjectAcl'
+            Resource:
+              - !Sub 'arn:${AWS::Partition}:s3:::${myBucketNameForRawCloudWatch}/*'
+            Condition:
+              StringEquals:
+                's3:x-amz-acl':
+                  - 'public-read'
+                  - 'public-read-write'
+                  - 'authenticated-read'
+          - Sid: DenyPublicReadGrant
+            Effect: Deny
+            Principal: '*'
+            Action:
+              - 's3:PutObject'
+              - 's3:PutObjectAcl'
+            Resource:
+              - !Sub 'arn:${AWS::Partition}:s3:::${myBucketNameForRawCloudWatch}/*'
+            Condition:
+              StringLike:
+                's3:x-amz-grant-read':
+                  - '*http://acs.amazonaws.com/groups/global/AllUsers*'
+                  - '*http://acs.amazonaws.com/groups/global/AuthenticatedUsers*'
+  StoreReadReadyCloudTrailBucket:
+    Type: AWS::S3::Bucket
+    DependsOn: 
+      - StoreRawCloudTrailCopiesBucket
+      - S3AccessLogsBucket
+    DeletionPolicy: Delete # Set as Delete for testing, change to Retain when completed
+    Properties:
+      OwnershipControls:
+        Rules:
+          - ObjectOwnership: BucketOwnerEnforced
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              KMSMasterKeyID:
+                Ref: EncryptKeyForLogLake
+              SSEAlgorithm: 'aws:kms'
+      BucketName: !Ref myBucketNameForReadReadyCloudTrail
+      LifecycleConfiguration:
+        Rules:
+          - Id: DeleteOldObjects
+            Status: Enabled
+            ExpirationInDays: !Ref myS3ReadReadyLifecycleExpirationDays
+      LoggingConfiguration:
+        DestinationBucketName: !Ref S3AccessLogsBucket
+        LogFilePrefix: !Sub 'access-logs/${myBucketNameForReadReadyCloudTrail}/'
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        IgnorePublicAcls: true
+        BlockPublicPolicy: true
+        RestrictPublicBuckets: true
+      VersioningConfiguration:
+        Status: Enabled
+      ObjectLockEnabled: true
+      ObjectLockConfiguration:
+        ObjectLockEnabled: Enabled
+        Rule:
+          DefaultRetention:
+            Mode: GOVERNANCE
+            Days: !Ref myS3ObjectLockDefaultRetentionDays
+  StoreReadReadyCloudTrailBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket:
+        Ref: StoreReadReadyCloudTrailBucket
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: DenyIncorrectEncryptionHeader
+            Effect: Deny
+            Principal: '*'
+            Action: 's3:PutObject'
+            Resource:
+              - !Sub 'arn:${AWS::Partition}:s3:::${myBucketNameForReadReadyCloudTrail}/*'
+            Condition:
+              StringEquals:
+                's3:x-amz-server-side-encryption': 'AES256'
+          - Sid: DenyNonHttpsConnections
+            Effect: Deny
+            Principal: '*'
+            Action:
+              - 's3:PutObject'
+              - 's3:GetObject'
+            Resource:
+              - !Sub 'arn:${AWS::Partition}:s3:::${myBucketNameForReadReadyCloudTrail}/*'
+            Condition:
+              Bool:
+                'aws:SecureTransport': false
+          - Sid: DenyPublicReadACL
+            Effect: Deny
+            Principal: '*'
+            Action:
+              - 's3:PutObject'
+              - 's3:PutObjectAcl'
+            Resource:
+              - !Sub 'arn:${AWS::Partition}:s3:::${myBucketNameForReadReadyCloudTrail}/*'
+            Condition:
+              StringEquals:
+                's3:x-amz-acl':
+                  - 'public-read'
+                  - 'public-read-write'
+                  - 'authenticated-read'
+          - Sid: DenyPublicReadGrant
+            Effect: Deny
+            Principal: '*'
+            Action:
+              - 's3:PutObject'
+              - 's3:PutObjectAcl'
+            Resource:
+              - !Sub 'arn:${AWS::Partition}:s3:::${myBucketNameForReadReadyCloudTrail}/*'
+            Condition:
+              StringLike:
+                's3:x-amz-grant-read':
+                  - '*http://acs.amazonaws.com/groups/global/AllUsers*'
+                  - '*http://acs.amazonaws.com/groups/global/AuthenticatedUsers*'
+  StoreReadReadyCloudWatchBucket:
+    Type: AWS::S3::Bucket
+    DependsOn: 
+      - StoreRawCloudWatchCopiesBucket
+      - S3AccessLogsBucket
+    DeletionPolicy: Delete # Set as Delete for testing, change to Retain when completed
+    Properties:
+      OwnershipControls:
+        Rules:
+          - ObjectOwnership: BucketOwnerEnforced
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              KMSMasterKeyID:
+                Ref: EncryptKeyForLogLake
+              SSEAlgorithm: 'aws:kms'
+      BucketName: !Ref myBucketNameForReadReadyCloudWatch
+      LifecycleConfiguration:
+        Rules:
+          - Id: DeleteOldObjects
+            Status: Enabled
+            ExpirationInDays: !Ref myS3ReadReadyLifecycleExpirationDays
+      LoggingConfiguration:
+        DestinationBucketName: !Ref S3AccessLogsBucket
+        LogFilePrefix: !Sub 'access-logs/${myBucketNameForReadReadyCloudWatch}/'
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        IgnorePublicAcls: true
+        BlockPublicPolicy: true
+        RestrictPublicBuckets: true
+      VersioningConfiguration:
+        Status: Enabled
+      ObjectLockEnabled: true
+      ObjectLockConfiguration:
+        ObjectLockEnabled: Enabled
+        Rule:
+          DefaultRetention:
+            Mode: GOVERNANCE
+            Days: !Ref myS3ObjectLockDefaultRetentionDays
+  StoreReadReadyCloudWatchBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket:
+        Ref: StoreReadReadyCloudWatchBucket
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: DenyIncorrectEncryptionHeader
+            Effect: Deny
+            Principal: '*'
+            Action: 's3:PutObject'
+            Resource:
+              - !Sub 'arn:${AWS::Partition}:s3:::${myBucketNameForReadReadyCloudWatch}/*'
+            Condition:
+              StringEquals:
+                's3:x-amz-server-side-encryption': 'AES256'
+          - Sid: DenyNonHttpsConnections
+            Effect: Deny
+            Principal: '*'
+            Action:
+              - 's3:PutObject'
+              - 's3:GetObject'
+            Resource:
+              - !Sub 'arn:${AWS::Partition}:s3:::${myBucketNameForReadReadyCloudWatch}/*'
+            Condition:
+              Bool:
+                'aws:SecureTransport': false
+          - Sid: DenyPublicReadACL
+            Effect: Deny
+            Principal: '*'
+            Action:
+              - 's3:PutObject'
+              - 's3:PutObjectAcl'
+            Resource:
+              - !Sub 'arn:${AWS::Partition}:s3:::${myBucketNameForReadReadyCloudWatch}/*'
+            Condition:
+              StringEquals:
+                's3:x-amz-acl':
+                  - 'public-read'
+                  - 'public-read-write'
+                  - 'authenticated-read'
+          - Sid: DenyPublicReadGrant
+            Effect: Deny
+            Principal: '*'
+            Action:
+              - 's3:PutObject'
+              - 's3:PutObjectAcl'
+            Resource:
+              - !Sub 'arn:${AWS::Partition}:s3:::${myBucketNameForReadReadyCloudWatch}/*'
+            Condition:
+              StringLike:
+                's3:x-amz-grant-read':
+                  - '*http://acs.amazonaws.com/groups/global/AllUsers*'
+                  - '*http://acs.amazonaws.com/groups/global/AuthenticatedUsers*'
+  S3AccessLogsBucket:
+    Type: AWS::S3::Bucket
+    # checkov:skip=CKV_AWS_18:This is the access logging bucket - logging it would create infinite recursion
+    DeletionPolicy: Delete # Set as Delete for testing, change to Retain when completed
+    Properties:
+      OwnershipControls:
+        Rules:
+          - ObjectOwnership: BucketOwnerEnforced
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              KMSMasterKeyID:
+                Ref: EncryptKeyForLogLake
+              SSEAlgorithm: 'aws:kms'
+      BucketName: !Ref myBucketNameForAccessLogs
+      LifecycleConfiguration:
+        Rules:
+          - Id: DeleteOldAccessLogs
+            Status: Enabled
+            ExpirationInDays: !Ref myS3AccessLogsLifecycleExpirationDays
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        IgnorePublicAcls: true
+        BlockPublicPolicy: true
+        RestrictPublicBuckets: true
+      VersioningConfiguration:
+        Status: Enabled
+      ObjectLockEnabled: true
+      ObjectLockConfiguration:
+        ObjectLockEnabled: Enabled
+        Rule:
+          DefaultRetention:
+            Mode: GOVERNANCE
+            Days: !Ref myS3ObjectLockDefaultRetentionDays
+  S3AccessLogsBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket:
+        Ref: S3AccessLogsBucket
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: AllowS3ServiceToWriteAccessLogs
+            Effect: Allow
+            Principal:
+              Service: logging.s3.amazonaws.com
+            Action:
+              - 's3:PutObject'
+            Resource:
+              - !Sub 'arn:${AWS::Partition}:s3:::${myBucketNameForAccessLogs}/*'
+            Condition:
+              StringEquals:
+                'aws:SourceAccount': !Ref 'AWS::AccountId'
+              ArnLike:
+                'aws:SourceArn': 
+                  - !Sub 'arn:${AWS::Partition}:s3:::${myBucketNameForRawCloudTrail}'
+                  - !Sub 'arn:${AWS::Partition}:s3:::${myBucketNameForRawCloudWatch}'
+                  - !Sub 'arn:${AWS::Partition}:s3:::${myBucketNameForReadReadyCloudTrail}'
+                  - !Sub 'arn:${AWS::Partition}:s3:::${myBucketNameForReadReadyCloudWatch}'
+                  - !Sub 'arn:${AWS::Partition}:s3:::${myBucketNameForAthenaQueries}'
+          - Sid: AsSource
+            Effect: Allow
+            Principal:
+              AWS:
+                !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:root'
+            Action:
+              - 's3:Get*'
+              - 's3:List*'
+            Resource:
+              - !Sub 'arn:${AWS::Partition}:s3:::${myBucketNameForAccessLogs}/*'
+              - !Sub 'arn:${AWS::Partition}:s3:::${myBucketNameForAccessLogs}'
+          - Sid: DenyIncorrectEncryptionHeader
+            Effect: Deny
+            Principal: '*'
+            Action: 's3:PutObject'
+            Resource:
+              - !Sub 'arn:${AWS::Partition}:s3:::${myBucketNameForAccessLogs}/*'
+            Condition:
+              StringEquals:
+                's3:x-amz-server-side-encryption': 'AES256'
+          - Sid: DenyNonHttpsConnections
+            Effect: Deny
+            Principal: '*'
+            Action:
+              - 's3:PutObject'
+              - 's3:GetObject'
+            Resource:
+              - !Sub 'arn:${AWS::Partition}:s3:::${myBucketNameForAccessLogs}/*'
+            Condition:
+              Bool:
+                'aws:SecureTransport': false
+          - Sid: DenyPublicReadACL
+            Effect: Deny
+            Principal: '*'
+            Action:
+              - 's3:PutObject'
+              - 's3:PutObjectAcl'
+            Resource:
+              - !Sub 'arn:${AWS::Partition}:s3:::${myBucketNameForAccessLogs}/*'
+            Condition:
+              StringEquals:
+                's3:x-amz-acl':
+                  - 'public-read'
+                  - 'public-read-write'
+                  - 'authenticated-read'
+          - Sid: DenyPublicReadGrant
+            Effect: Deny
+            Principal: '*'
+            Action:
+              - 's3:PutObject'
+              - 's3:PutObjectAcl'
+            Resource:
+              - !Sub 'arn:${AWS::Partition}:s3:::${myBucketNameForAccessLogs}/*'
+            Condition:
+              StringLike:
+                's3:x-amz-grant-read':
+                  - '*http://acs.amazonaws.com/groups/global/AllUsers*'
+                  - '*http://acs.amazonaws.com/groups/global/AuthenticatedUsers*'
+  AthenaQueriesBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Delete # Set as Delete for testing, change to Retain when completed
+    Properties:
+      AccessControl: BucketOwnerFullControl
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              KMSMasterKeyID:
+                Ref: EncryptKeyForLogLake
+              SSEAlgorithm: 'aws:kms'
+      BucketName: !Ref myBucketNameForAthenaQueries
+      LifecycleConfiguration:
+        Rules:
+          - Id: DeleteOldAthenaQueries
+            Status: Enabled
+            ExpirationInDays: !Ref myS3AthenaQueriesLifecycleExpirationDays
+      LoggingConfiguration:
+        DestinationBucketName: !Ref S3AccessLogsBucket
+        LogFilePrefix: !Sub 'access-logs/${myBucketNameForAthenaQueries}/'
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        IgnorePublicAcls: true
+        BlockPublicPolicy: true
+        RestrictPublicBuckets: true
+      VersioningConfiguration:
+        Status: Enabled
+      ObjectLockEnabled: true
+      ObjectLockConfiguration:
+        ObjectLockEnabled: Enabled
+        Rule:
+          DefaultRetention:
+            Mode: GOVERNANCE
+            Days: !Ref myS3ObjectLockDefaultRetentionDays
+  AthenaQueriesBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket:
+        Ref: AthenaQueriesBucket
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: AsSource
+            Effect: Allow
+            Principal:
+              AWS:
+                !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:root'
+            Action:
+              - 's3:Get*'
+              - 's3:List*'
+              - 's3:Put*'
+              - 's3:Delete*'
+            Resource:
+              - !Sub 'arn:${AWS::Partition}:s3:::${myBucketNameForAthenaQueries}/*'
+              - !Sub 'arn:${AWS::Partition}:s3:::${myBucketNameForAthenaQueries}'
+          - Sid: DenyIncorrectEncryptionHeader
+            Effect: Deny
+            Principal: '*'
+            Action: 's3:PutObject'
+            Resource:
+              - !Sub 'arn:${AWS::Partition}:s3:::${myBucketNameForAthenaQueries}/*'
+            Condition:
+              StringEquals:
+                's3:x-amz-server-side-encryption': 'AES256'
+          - Sid: DenyNonHttpsConnections
+            Effect: Deny
+            Principal: '*'
+            Action:
+              - 's3:PutObject'
+              - 's3:GetObject'
+            Resource:
+              - !Sub 'arn:${AWS::Partition}:s3:::${myBucketNameForAthenaQueries}/*'
+            Condition:
+              Bool:
+                'aws:SecureTransport': false
+          - Sid: DenyPublicReadACL
+            Effect: Deny
+            Principal: '*'
+            Action:
+              - 's3:PutObject'
+              - 's3:PutObjectAcl'
+            Resource:
+              - !Sub 'arn:${AWS::Partition}:s3:::${myBucketNameForAthenaQueries}/*'
+            Condition:
+              StringEquals:
+                's3:x-amz-acl':
+                  - 'public-read'
+                  - 'public-read-write'
+                  - 'authenticated-read'
+          - Sid: DenyPublicReadGrant
+            Effect: Deny
+            Principal: '*'
+            Action:
+              - 's3:PutObject'
+              - 's3:PutObjectAcl'
+            Resource:
+              - !Sub 'arn:${AWS::Partition}:s3:::${myBucketNameForAthenaQueries}/*'
+            Condition:
+              StringLike:
+                's3:x-amz-grant-read':
+                  - '*http://acs.amazonaws.com/groups/global/AllUsers*'
+                  - '*http://acs.amazonaws.com/groups/global/AuthenticatedUsers*'
+Outputs:
+  KeyArnForLogLake:
+    Description: Key ARN used across log lake
+    Value: !GetAtt EncryptKeyForLogLake.Arn
+  KeyIdForLogLake:
+    Description: Key ID used across log lake
+    Value: !GetAtt EncryptKeyForLogLake.KeyId
+  BucketArnForRawCloudTrail:
+    Description: ARN of the CloudTrail Raw bucket
+    Value: !GetAtt StoreRawCloudTrailCopiesBucket.Arn
+  BucketNameForRawCloudTrail:
+    Description: Name of the CloudTrail Raw bucket
+    Value: !Ref StoreRawCloudTrailCopiesBucket
+  BucketArnForRawCloudWatch:
+    Description: ARN of the CloudWatch Raw bucket
+    Value: !GetAtt StoreRawCloudWatchCopiesBucket.Arn
+  BucketNameForRawCloudWatch:
+    Description: Name of the CloudWatch Raw bucket
+    Value: !Ref StoreRawCloudWatchCopiesBucket
+  BucketArnForReadReadyCloudTrail:
+    Description: ARN of the CloudTrail ReadReady bucket
+    Value: !GetAtt StoreReadReadyCloudTrailBucket.Arn
+  BucketNameForReadReadyCloudTrail:
+    Description: Name of the CloudTrail ReadReady bucket
+    Value: !Ref StoreReadReadyCloudTrailBucket
+  BucketArnForReadReadyCloudWatch:
+    Description: ARN of the CloudWatch ReadReady bucket
+    Value: !GetAtt StoreReadReadyCloudWatchBucket.Arn
+  BucketNameForReadReadyCloudWatch:
+    Description: Name of the CloudWatch ReadReady bucket
+    Value: !Ref StoreReadReadyCloudWatchBucket
+  BucketArnForAccessLogs:
+    Description: ARN of the S3 Access Logs bucket
+    Value: !GetAtt S3AccessLogsBucket.Arn
+  BucketNameForAccessLogs:
+    Description: Name of the S3 Access Logs bucket
+    Value: !Ref S3AccessLogsBucket
+  BucketArnForAthenaQueries:
+    Description: ARN of the Athena Queries bucket
+    Value: !GetAtt AthenaQueriesBucket.Arn
+  BucketNameForAthenaQueries:
+    Description: Name of the Athena Queries bucket
+    Value: !Ref AthenaQueriesBucket

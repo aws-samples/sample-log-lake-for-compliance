@@ -1,0 +1,16 @@
+{
+    "messageType": "DATA_MESSAGE",
+    "owner": "111111111111",
+    "logGroup": "loggroup_for_sessionlogs",
+    "logStream": "theuser-thefederation-0b7c1cc185ccf51a9",
+    "subscriptionFilters": [
+        "mysessions"
+    ],
+    "logEvents": [
+        {
+            "id": "38494576724164991552386496314680297076562947493154521088",
+            "timestamp": 1726156519949,
+            "message": "{\"eventVersion\":\"1.0\",\"eventTime\":\"2024-09-12T15:55:19Z\",\"awsRegion\":\"us-east-1\",\"target\":{\"id\":\"i-089ed2b5b1eaeebc2\"},\"userIdentity\":{\"arn\":\"arn:aws:sts::111111111111:assumed-role/Admin/theuser-thefederation\"},\"runAsUser\":\"ssm-user\",\"sessionId\":\"theuser-thefederation-0b7c1cc185ccf51a9\",\"sessionData\":[\"sh-5.2$ echo \\\"as colin and sean make a session at 8:55am sep 12 2024\\\"\",\"as colin and sean make a session at 8:55am sep 12 2024\"]}"
+        }
+    ]
+}

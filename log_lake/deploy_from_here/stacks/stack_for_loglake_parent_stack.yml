@@ -1,0 +1,481 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Parent stack that calls loglake stacks sequentially
+# ============================================================================
+# IMPORTANT: DeletionPolicy is set to 'Delete' for all buckets to facilitate
+# testing and cleanup. For production deployments, change DeletionPolicy to
+# 'Retain' in the nested stacks to prevent accidental data loss.
+#
+# Object Lock is enabled with GOVERNANCE mode (not COMPLIANCE) to allow
+# testing flexibility. Users with s3:BypassGovernanceRetention permission
+# can delete objects during testing. For production, consider COMPLIANCE mode.
+# ============================================================================
+Parameters:
+  myLabel:
+    Type: String
+    Description: "Label is used to automate naming for new resources so stack author does not need to provide resource names for all resources. Resource names must still be provided for prereq resources such as supporting files bucket & key."
+    MinLength : "1"
+    MaxLength : "20"
+    AllowedPattern : "^[a-zA-Z-0-9]*$"
+    Default: "loglakeblog"
+  myStackUrlForStorage:
+    Type: String
+    Default: https://as-loglakeblog-store-supporting-files.s3.us-east-1.amazonaws.com/stacks/nested_stacks/stack_for_loglake_step1_storageonly.yml
+  myStackUrlForMetaRaw:
+    Type: String
+    Default: https://as-loglakeblog-store-supporting-files.s3.us-east-1.amazonaws.com/stacks/nested_stacks/stack_for_loglake_step2a_meta_raw.yml
+  myStackUrlForMetaReadReady:
+    Type: String
+    Default: https://as-loglakeblog-store-supporting-files.s3.us-east-1.amazonaws.com/stacks/nested_stacks/stack_for_loglake_step2b_meta_readready.yml
+  myStackUrlForAddAPartRaw:
+    Type: String
+    Default: https://as-loglakeblog-store-supporting-files.s3.us-east-1.amazonaws.com/stacks/nested_stacks/stack_for_loglake_step3_addapart.yml
+  myStackUrlForReadReadyGlueJobs:
+    Type: String
+    Default: https://as-loglakeblog-store-supporting-files.s3.us-east-1.amazonaws.com/stacks/nested_stacks/stack_for_loglake_step4_gluejobs.yml
+  myStackUrlForAddAPartReadReady:
+    Type: String 
+    Default: https://as-loglakeblog-store-supporting-files.s3.us-east-1.amazonaws.com/stacks/nested_stacks/stack_for_loglake_step3_addapart.yml
+  myApplicationNameTag:
+    Type: String 
+    Default: "loglakeblog"
+  myBucketNameForSupportingFiles:
+    Type: String
+    Description: "Bucket where code lives, that has the files used by lambdas"
+    Default: "as-loglakeblog-store-supporting-files"
+  myEncryptKeyArnForSupportingFilesBucket:
+    Type: String
+    Description: Existing KMS key used for supporting files bucket
+    Default: ""
+  myGlueDatabaseName:
+    Type: String
+    Description: Glue database name to be created for LogLake.
+    Default: "loglakeblog"
+    AllowedPattern: '^[a-zA-Z-0-9]*$'
+# Below can be left as default
+# Parameters for trusted stack - process_RAW
+  myCentralLakeAccountId:
+    Type: String
+    Description: "AWS Account ID for the central data lake governance account used for Glue cross-catalog permissions. For initial deployment, use the AWS Account ID where you are deploying this stack. In multi-account architectures, this may differ from producer or consumer accounts."
+    AllowedPattern: '^\d{12}$'
+    Default: ""
+  myCentralLakePartition: 
+    Type: String 
+    Description: 'AWS Partition (aws, aws-cn, or aws-us-gov)'
+    AllowedValues:
+      - "aws"        # Standard AWS regions
+      - "aws-cn"     # AWS China regions
+      - "aws-us-gov" # AWS GovCloud regions
+    Default: aws
+  myCentralLakeRegion:
+    Type: String
+    Description: "Region to use for cross catalog access. Can be any region supported by central lake."
+    Default: us-east-1
+# S3 Bucket Lifecycle Configuration
+  myS3RawLifecycleExpirationDays:
+    Type: Number
+    Description: "Number of days for S3 Lifecycle Rule"
+    Default: 999
+    MinValue: 1
+    MaxValue: 999
+  myS3ReadReadyLifecycleExpirationDays:
+    Type: Number
+    Description: "Number of days for S3 Lifecycle Rule"
+    Default: 999
+    MinValue: 1
+    MaxValue: 999
+  myS3AccessLogsLifecycleExpirationDays:
+    Type: Number
+    Description: "Number of days for S3 Access Logs Lifecycle Rule"
+    Default: 90
+  myS3ObjectLockDefaultRetentionDays:
+    Type: Number
+    Description: "Number of days for S3 Object Lock default retention"
+    MinValue: 1
+    MaxValue: 365
+    Default: 7
+  myS3AthenaQueriesLifecycleExpirationDays:
+    Type: Number
+    Description: "Number of days for Athena Queries S3 Lifecycle Rule"
+    MinValue: 1
+    MaxValue: 999
+    Default: 30
+  myPrefixForCloudTrail:
+    Type: String
+    Default: from_cloudtrail_readready/orc/
+  myPrefixForCloudWatch:
+    Type: String
+    Default: from_cloudwatch_readready/orc/
+  #addAPartAll
+  myHandler:
+    Type: String
+    Default: "lambda_function.lambda_handler"
+  myCodeForAddAPartProducerRaw:
+    Type: String
+    Description: "Function to trigger on s3 put, and send a message to sqs queue"
+    Default: "resources/files_for_producer_raw.zip"
+  myCodeForAddAPartConsumerRaw:
+    Type: String
+    Description: "Function to respond to sqs messages and add a partition using Glue API"
+    Default: "resources/files_for_consumer_raw.zip"
+  myCodeForAddAPartProducerReadReady:
+    Type: String
+    Description: "Function to trigger on s3 put, and send a message to sqs queue"
+    Default: "resources/files_for_producer_readready.zip"
+  myCodeForAddAPartConsumerReadReady:
+    Type: String
+    Description: "Function to respond to sqs messages and add a partition using Glue API"
+    Default: "resources/files_for_consumer_readready.zip"
+  # Glue job
+  myJobTriggerSchedule:
+    Type: String
+    Description: Run jobs less frequently than cadence of incoming data (eg CloudTrail SLA is 15 min, so >15 min for CloudTrail)
+    Default: "cron(0/33 * * * ? *)"
+  myJobScriptForCloudTrail:
+    Type: String
+    Description: "prefix under bucket for script (if uri is s3://mybucket/myfolder/myscript.py then use folder/myscript.py)"
+    Default: "resources/glue_driver_manyview_readready_for_cloudtrail.py"
+  myJobScriptForCloudWatch:
+    Type: String
+    Description: "prefix under bucket for script (if uri is s3://mybucket/myfolder/myscript.py then use folder/myscript.py)"
+    Default: "resources/glue_driver_manyview_readready_for_cloudwatch.py"
+  myJobVersion:
+    Type: String
+    Default: 5.0
+  myJobMaxConcurrentRuns:
+    Type: Number
+    Description: "Set to 1 to avoid potential duplicate work, increase to allow horizontal scaling (separate instances)."
+    Default: 1
+  myJobTimeoutInMin:
+    Type: Number
+    Description: "Glue Job Timeout Duration (minutes)"
+    Default: 55
+  myJobWorkerType:
+    Type: String
+    Description: "Glue Job Worker Size"
+    Default: G.2X
+    AllowedValues:
+      - Standard
+      - G.1X
+      - G.2X
+      - G.4X
+      - G.8X
+      - G.025X
+  myJobNumOfWorkers:
+    Type: Number
+    Description: "Number of Glue Job Workers (required when specifying Glue Worker type)"
+    Default: 10
+  myBoundedExecutionNumOfRows:
+    Type: Number
+    MinValue: 1
+    MaxValue: 999999999
+    Default: 999999
+    Description: "The upper bound for the job, used for autobackfill & workload partitioning. Larger value means more workload for the job, and should be considered with worker type & count."
+  myGlueExtraJars:
+    Type: String
+    Description: "S3 Link to the JSON Serde."  
+    Default: s3://crawler-public/json/serde/json-serde.jar
+  myRelativeDaysBegin:
+    Description: "Relative days to set begin of bounded execution"
+    Type: Number
+    MinValue: 1
+    MaxValue: 999
+    Default: 444
+Metadata: 
+  AWS::CloudFormation::Interface: 
+    ParameterGroups: 
+      - 
+        Label: 
+          default: "General Setup"
+        Parameters: 
+          - myLabel
+          - myBucketNameForSupportingFiles
+          - myEncryptKeyArnForSupportingFilesBucket
+          - myGlueDatabaseName
+          - myCentralLakeAccountId
+          - myCentralLakePartition
+          - myCentralLakeRegion
+      - 
+        Label: 
+          default: "S3 Bucket Information"
+        Parameters:
+          - myS3RawLifecycleExpirationDays
+          - myS3ReadReadyLifecycleExpirationDays
+          - myS3AccessLogsLifecycleExpirationDays
+          - myS3AthenaQueriesLifecycleExpirationDays
+          - myS3ObjectLockDefaultRetentionDays
+          - myPrefixForCloudTrail
+          - myPrefixForCloudWatch
+      - 
+        Label: 
+          default: "AddAPart Lambdas"
+        Parameters:
+          - myHandler
+          - myCodeForAddAPartProducerRaw
+          - myCodeForAddAPartConsumerRaw
+          - myCodeForAddAPartProducerReadReady
+          - myCodeForAddAPartConsumerReadReady
+      - 
+        Label: 
+          default: "Glue Job Configuration"
+        Parameters: 
+          - myJobTriggerSchedule
+          - myJobScriptForCloudWatch
+          - myJobScriptForCloudTrail
+          - myJobVersion
+          - myJobMaxConcurrentRuns
+          - myJobTimeoutInMin
+          - myJobWorkerType
+          - myJobNumOfWorkers
+          - myBoundedExecutionNumOfRows
+          - myGlueExtraJars
+          - myRelativeDaysBegin
+
+    ParameterLabels: 
+      # PRE-REQ
+      myLabel: 
+        default: "User-defined Label Name"
+      myBucketNameForSupportingFiles: 
+        default: "Bucket Name for Supporting Files S3 Bucket"
+      myEncryptKeyArnForSupportingFilesBucket: 
+        default: "Key ARN used to encrypt the Supporting Files S3 Bucket"
+      myGlueDatabaseName: 
+        default: "Glue Database Name"
+      myCentralLakeAccountId: 
+        default: "Central Lake Account ID"
+      myCentralLakePartition: 
+        default: "Central Lake Partition"
+      myCentralLakeRegion: 
+        default: "Central Lake AWS Region"
+
+      # S3 Bucket Setup
+      myS3RawLifecycleExpirationDays: 
+        default: "Raw Object Expiration (days)"
+      myS3ReadReadyLifecycleExpirationDays: 
+        default: "Readready Object Expiration (days)"
+      myS3AccessLogsLifecycleExpirationDays: 
+        default: "Access Logs Object Expiration (days)"
+      myS3AthenaQueriesLifecycleExpirationDays: 
+        default: "Athena Queries Object Expiration (days)"
+      myS3ObjectLockDefaultRetentionDays: 
+        default: "Object Lock Default Retention (days)"
+      myPrefixForCloudTrail:
+        default: "CloudTrail Prefix"
+      myPrefixForCloudWatch:
+        default: "CloudWatch Prefix"
+
+      # AddAPart Lambdas
+      myHandler:
+        default: "Lambda Handler Name"    
+      myCodeForAddAPartProducerRaw:
+        default: "Zip location for AddAPart producer (raw)"
+      myCodeForAddAPartConsumerRaw:
+        default: "Zip location for AddAPart consumer (raw)"
+      myCodeForAddAPartProducerReadReady:
+        default: "Zip location for AddAPart producer (readready)"
+      myCodeForAddAPartConsumerReadReady:
+        default: "Zip location for AddAPart consumer (readready)"
+      myRoleNameForFunctionReadReadyProducerCloudTrail:
+        default: "IAM Role Name For Function ReadReady Producer CloudTrail"
+      myRoleNameForFunctionReadReadyConsumerCloudTrail:
+        default: "IAM Role Name For Function ReadReady Consumer CloudTrail"
+      myRoleNameForFunctionReadReadyProducerCloudWatch:
+        default: "IAM Role Name For Function ReadReady Producer CloudWatch"
+      myRoleNameForFunctionReadReadyConsumerCloudWatch:
+        default: "IAM Role Name For Function ReadReady Consumer CloudWatch"
+
+      # Glue Job Configuration
+      myJobTriggerSchedule: 
+        default: "Glue Job Trigger Schedule"
+      myJobScriptForCloudWatch: 
+        default: "Script Location for CloudWatch Glue Job"
+      myJobScriptForCloudTrail: 
+        default: "Script Location for CloudTrail Glue Job"
+      myJobVersion: 
+        default: "Glue Job Version"
+      myJobMaxConcurrentRuns: 
+        default: "Glue Job Max Number of Concurrent Runs"
+      myJobTimeoutInMin: 
+        default: "Glue Job Timeout Duration (minutes)"
+      myJobWorkerType: 
+        default: "Glue Job Worker Size"
+      myJobNumOfWorkers: 
+        default: "Number of Glue Job Workers"
+      myBoundedExecutionNumOfRows: 
+        default: "Bounded Execution Number of Rows"
+      myGlueExtraJars:
+        default: "Glue Extra Jars"
+      myRelativeDaysBegin:
+        default: "Relative Days Begin"
+
+Resources:
+
+  StorageOnly:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: !Ref myStackUrlForStorage
+      Parameters:
+        myBucketNameForRawCloudTrail: !Sub as-${myLabel}-store-cloudtrail-raw
+        myBucketNameForRawCloudWatch: !Sub as-${myLabel}-store-cloudwatch-raw
+        myBucketNameForReadReadyCloudTrail: !Sub as-${myLabel}-store-cloudtrail-readready
+        myBucketNameForReadReadyCloudWatch: !Sub as-${myLabel}-store-cloudwatch-readready
+        myBucketNameForAccessLogs: !Sub as-${myLabel}-store-access-logs
+        myBucketNameForAthenaQueries: !Sub as-${myLabel}-store-athena-queries
+        myKMSKeyAlias: !Sub as-key-encrypt-for-${myLabel}
+        myS3RawLifecycleExpirationDays: !Ref myS3RawLifecycleExpirationDays
+        myS3ReadReadyLifecycleExpirationDays: !Ref myS3ReadReadyLifecycleExpirationDays
+        myS3AccessLogsLifecycleExpirationDays: !Ref myS3AccessLogsLifecycleExpirationDays
+        myS3AthenaQueriesLifecycleExpirationDays: !Ref myS3AthenaQueriesLifecycleExpirationDays
+        myS3ObjectLockDefaultRetentionDays: !Ref myS3ObjectLockDefaultRetentionDays
+      Tags:
+        - Key: "ApplicationName"
+          Value: !Ref myApplicationNameTag
+        - Key: "AWSRegion"
+          Value: !Ref myCentralLakeRegion
+
+  MetaRaw:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: !Ref myStackUrlForMetaRaw
+      Parameters:
+        myBucketNameForRawCloudTrail: !GetAtt StorageOnly.Outputs.BucketNameForRawCloudTrail
+        myBucketNameForRawCloudWatch: !GetAtt StorageOnly.Outputs.BucketNameForRawCloudWatch
+        myGlueDatabaseName: !Ref myGlueDatabaseName
+      Tags:
+        - Key: "ApplicationName"
+          Value: !Ref myApplicationNameTag
+        - Key: "AWSRegion"
+          Value: !Ref myCentralLakeRegion
+    DependsOn: StorageOnly
+
+  MetaReadReady:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: !Ref myStackUrlForMetaReadReady
+      Parameters:
+        myGlueDatabaseName: !Ref myGlueDatabaseName
+        myBucketNameForReadReadyCloudTrail: !GetAtt StorageOnly.Outputs.BucketNameForReadReadyCloudTrail
+        myBucketNameForReadReadyCloudWatch: !GetAtt StorageOnly.Outputs.BucketNameForReadReadyCloudWatch
+        myPrefixForCloudTrail: !Ref myPrefixForCloudTrail
+        myPrefixForCloudWatch: !Ref myPrefixForCloudWatch
+      Tags:
+        - Key: "ApplicationName"
+          Value: !Ref myApplicationNameTag
+    DependsOn: MetaRaw
+
+  AddAPartRaw:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: !Ref myStackUrlForAddAPartRaw
+      Parameters:
+        myCentralLakeAccountId: !Ref myCentralLakeAccountId
+        myCentralLakePartition: !Ref myCentralLakePartition
+        myCentralLakeRegion: !Ref myCentralLakeRegion
+        myFunctionNameForProducer: !Sub as-${myLabel}-addapart-producer-raw
+        myFunctionNameForConsumer: !Sub as-${myLabel}-addapart-consumer-raw
+        myRoleNameForFunctionProducer: !Sub as-${myLabel}-addapart-producer-raw-rol
+        myRoleNameForFunctionConsumer: !Sub as-${myLabel}-addapart-consumer-raw-rol
+        myBucketNameToTriggerProducerCloudTrail: !GetAtt StorageOnly.Outputs.BucketNameForRawCloudTrail
+        myBucketNameToTriggerProducerCloudWatch: !GetAtt StorageOnly.Outputs.BucketNameForRawCloudWatch
+        myBucketNameForSupportingFiles: !Ref myBucketNameForSupportingFiles
+        myEncryptKeyArnForSupportingFilesBucket: !Ref myEncryptKeyArnForSupportingFilesBucket
+        myEncryptKeyArnForQueueAndLambda: !GetAtt StorageOnly.Outputs.KeyArnForLogLake
+        myEncryptKeyArnForTriggeringBuckets: !GetAtt StorageOnly.Outputs.KeyArnForLogLake
+        myHandler: !Ref myHandler
+        myEncryptKeyForQueueIdOnly: !GetAtt StorageOnly.Outputs.KeyIdForLogLake
+        myCodeForAddAPartProducer: !Ref myCodeForAddAPartProducerRaw
+        myCodeForAddAPartConsumer: !Ref myCodeForAddAPartConsumerRaw
+        myGlueDatabaseName: !GetAtt MetaRaw.Outputs.LogLakeGlueDatabase
+      Tags:
+        - Key: "ApplicationName"
+          Value: !Ref myApplicationNameTag
+        - Key: "AWSRegion"
+          Value: !Ref myCentralLakeRegion
+    DependsOn: MetaReadReady
+
+  ReadReadyGlueJobs:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: !Ref myStackUrlForReadReadyGlueJobs
+      Parameters:
+        myCentralLakeAccountId: !Ref myCentralLakeAccountId
+        myCentralLakePartition: !Ref myCentralLakePartition
+        myCentralLakeRegion:    !Ref myCentralLakeRegion
+        myBucketNameForQueryResults: !GetAtt StorageOnly.Outputs.BucketNameForAthenaQueries
+        myBucketNameForRawCloudTrail: !GetAtt StorageOnly.Outputs.BucketNameForRawCloudTrail
+        myBucketNameForRawCloudWatch: !GetAtt StorageOnly.Outputs.BucketNameForRawCloudWatch
+        myBucketNameForReadReadyCloudTrail: !GetAtt StorageOnly.Outputs.BucketNameForReadReadyCloudTrail
+        myBucketNameForReadReadyCloudWatch: !GetAtt StorageOnly.Outputs.BucketNameForReadReadyCloudWatch
+        myBucketNameForSupportingFiles: !Ref myBucketNameForSupportingFiles
+        myLocationForCloudTrail: !Sub s3://${StorageOnly.Outputs.BucketNameForReadReadyCloudTrail}/from_cloudtrail_readready/orc
+        myLocationForCloudWatch: !Sub s3://${StorageOnly.Outputs.BucketNameForReadReadyCloudWatch}/from_cloudwatch_readready/orc
+        myEncryptKeyArnForSupportingFilesBucket: !Ref myEncryptKeyArnForSupportingFilesBucket
+        myEncryptKeyArnForRawBucket: !GetAtt StorageOnly.Outputs.KeyArnForLogLake
+        myEncryptKeyArnForReadReadyBucket: !GetAtt StorageOnly.Outputs.KeyArnForLogLake
+        myEncryptKeyArnForGlueJobS3CloudWatch: !GetAtt StorageOnly.Outputs.KeyArnForLogLake
+        myHandler: !Ref myHandler
+        myEncryptKeyForQueueIdOnly: !GetAtt StorageOnly.Outputs.KeyIdForLogLake
+        myRoleNameForGlueJob: !Sub as-${myLabel}-glue-job-readready-rol
+        myGlueJobNameForCloudTrail: !Sub as-${myLabel}-process-raw-to-readready-cloudtrail
+        myGlueJobNameForCloudWatch: !Sub as-${myLabel}-process-raw-to-readready-cloudwatch
+        myGlueJobTriggerNameCloudTrailCloudWatch: !Sub as-${myLabel}-trigger-job-cloudtrail-cloudwatch
+        myGlueDatabaseName: !GetAtt MetaRaw.Outputs.LogLakeGlueDatabase
+        myJobTriggerSchedule: !Ref myJobTriggerSchedule
+        myJobScriptForCloudTrail: !Ref myJobScriptForCloudTrail
+        myJobScriptForCloudWatch: !Ref myJobScriptForCloudWatch
+        myJobVersion: !Ref myJobVersion
+        myJobMaxConcurrentRuns: !Ref myJobMaxConcurrentRuns
+        myJobTimeoutInMin: !Ref myJobTimeoutInMin
+        myJobWorkerType: !Ref myJobWorkerType
+        myJobNumOfWorkers: !Ref myJobNumOfWorkers
+        myBoundedExecutionNumOfRows: !Ref myBoundedExecutionNumOfRows
+        myGlueExtraJars: !Ref myGlueExtraJars
+        myRelativeDaysBegin: !Ref myRelativeDaysBegin
+      Tags:
+        - Key: "ApplicationName"
+          Value: !Ref myApplicationNameTag
+        - Key: "AWSRegion"
+          Value: !Ref myCentralLakeRegion
+    DependsOn: AddAPartRaw
+
+  AddAPartReadReady:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: !Ref myStackUrlForAddAPartReadReady
+      Parameters:
+        myCentralLakeAccountId: !Ref myCentralLakeAccountId
+        myCentralLakePartition: !Ref myCentralLakePartition
+        myCentralLakeRegion: !Ref myCentralLakeRegion
+        myFunctionNameForProducer: !Sub as-${myLabel}-addapart-producer-readready
+        myFunctionNameForConsumer: !Sub as-${myLabel}-addapart-consumer-readready
+        myRoleNameForFunctionProducer: !Sub as-${myLabel}-addapart-producer-readready-rol
+        myRoleNameForFunctionConsumer: !Sub as-${myLabel}-addapart-consumer-readready-rol
+        myBucketNameToTriggerProducerCloudTrail: !GetAtt StorageOnly.Outputs.BucketNameForReadReadyCloudTrail
+        myBucketNameToTriggerProducerCloudWatch: !GetAtt StorageOnly.Outputs.BucketNameForReadReadyCloudWatch
+        myBucketNameForSupportingFiles: !Ref myBucketNameForSupportingFiles
+        myEncryptKeyArnForSupportingFilesBucket: !Ref myEncryptKeyArnForSupportingFilesBucket
+        myEncryptKeyArnForQueueAndLambda: !GetAtt StorageOnly.Outputs.KeyArnForLogLake
+        myEncryptKeyArnForTriggeringBuckets: !GetAtt StorageOnly.Outputs.KeyArnForLogLake
+        myHandler: !Ref myHandler
+        myEncryptKeyForQueueIdOnly: !GetAtt StorageOnly.Outputs.KeyIdForLogLake
+        myCodeForAddAPartProducer: !Ref myCodeForAddAPartProducerReadReady
+        myCodeForAddAPartConsumer: !Ref myCodeForAddAPartConsumerReadReady
+        myGlueDatabaseName: !GetAtt MetaRaw.Outputs.LogLakeGlueDatabase
+      Tags:
+        - Key: "ApplicationName"
+          Value: !Ref myApplicationNameTag
+        - Key: "AWSRegion"
+          Value: !Ref myCentralLakeRegion
+    DependsOn: ReadReadyGlueJobs
+Outputs:
+  AddTargetForS3EventNotification:
+    Description: Add as S3 event notification for all "ObjectCreated" events in CloudTrail Readready bucket
+    Value: !GetAtt AddAPartReadReady.Outputs.AddTargetForS3EventNotification
+  AddThisProducerLambdaRoleToExistingKeyPolicy:
+    Description: Like the Glue Job, this pipeline Producer Lambda needs to access the existing Supporting Files bucket
+    Value: !GetAtt AddAPartReadReady.Outputs.AddThisProducerLambdaRoleToExistingKeyUsedForQueue
+  AddThisConsumerLambdaRoleToExistingKeyPolicy:
+    Description: Like the Glue Job, this pipeline Consumer Lambda needs to access the existing Supporting Files bucket
+    Value: !GetAtt AddAPartReadReady.Outputs.AddThisConsumerLambdaRoleToExistingKeyUsedForQueue
+  AddThisJobRoleToExistingKeyPolicy:
+    Description: This role is used by the Glue Job that process raw->readready
+    Value: !GetAtt ReadReadyGlueJobs.Outputs.AddThisJobRoleToExistingKeyPolicy

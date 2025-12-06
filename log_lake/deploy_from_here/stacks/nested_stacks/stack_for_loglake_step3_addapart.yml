@@ -1,0 +1,422 @@
+AWSTemplateFormatVersion : 2010-09-09
+Description: "AddAPart is a mechanism to add partitions to source hive tables with high performance. Source blog: https://aws.amazon.com/blogs/big-data/create-a-customizable-cross-company-log-lake-for-compliance-part-i-business-background/"
+Parameters:
+  myCentralLakeAccountId:
+    Type: String
+  myCentralLakePartition: 
+    Type: String
+  myCentralLakeRegion:
+    Type: String
+  myFunctionNameForProducer:
+    Type: String
+    Description: "Name of Lambda function that will be target of s3 notification trigger, and send eligible messages to queue based on s3 key"
+  myFunctionNameForConsumer:
+    Type: String
+    Description: "Name of Lambda function that will trigger on a queue, and use the Glue API to create a partition if none"
+  myRoleNameForFunctionProducer:
+    Type: String
+    Description: "Name of the IAM Role used by addAPart producer"
+  myRoleNameForFunctionConsumer:
+    Type: String
+    Description: "Name of the IAM Role used by addAPart consumer"
+  myBucketNameToTriggerProducerCloudTrail:
+    Type: String
+  myBucketNameToTriggerProducerCloudWatch:
+    Type: String
+  myBucketNameForSupportingFiles:
+    Type: String
+  myEncryptKeyArnForSupportingFilesBucket:
+    Type: String
+  myEncryptKeyArnForQueueAndLambda:
+    Type: String
+  myEncryptKeyArnForTriggeringBuckets:
+    Type: String
+  #addAPartAll
+  myHandler:
+    Type: String
+  myEncryptKeyForQueueIdOnly:
+    Type: String
+  #addAPart, ReadIn only
+  myCodeForAddAPartProducer:
+    Type: String
+  myCodeForAddAPartConsumer:
+    Type: String
+  myGlueDatabaseName: 
+    Type: String
+Resources:
+  QueueForProducerToSendTo:
+    Type: AWS::SQS::Queue
+    Properties:
+      ContentBasedDeduplication: true # this generates a MessageDeduplicationId automatically
+      FifoQueue: true
+      ReceiveMessageWaitTimeSeconds: 20
+      MessageRetentionPeriod: 14400 # 4 hours
+      DeduplicationScope: messageGroup
+      FifoThroughputLimit: perMessageGroupId
+      VisibilityTimeout: 300 # 5 mins
+      KmsMasterKeyId: !Ref myEncryptKeyForQueueIdOnly
+  DeadLetterQueueForProducer:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub "${myFunctionNameForProducer}-dlq"
+      MessageRetentionPeriod: 1209600 # 14 days
+      KmsMasterKeyId: !Ref myEncryptKeyForQueueIdOnly
+  DeadLetterQueueForConsumer:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub "${myFunctionNameForConsumer}-dlq"
+      MessageRetentionPeriod: 1209600 # 14 days
+      KmsMasterKeyId: !Ref myEncryptKeyForQueueIdOnly
+  QueuePolicy:
+    Type: 'AWS::SQS::QueuePolicy'
+    Properties:
+      Queues:
+        - !Ref QueueForProducerToSendTo
+        - !Ref DeadLetterQueueForProducer
+        - !Ref DeadLetterQueueForConsumer
+      PolicyDocument:
+        Statement:
+          - Action:
+              - 'SQS:ReceiveMessage'
+              - 'SQS:DeleteMessage'
+              - 'SQS:GetQueueAttributes'
+            Effect: Allow
+            Resource: !GetAtt QueueForProducerToSendTo.Arn
+            Principal:
+              AWS:
+                - !GetAtt RoleForAddAPartProducer.Arn
+                - !GetAtt RoleForAddAPartConsumer.Arn
+          - Action:
+              - 'SQS:SendMessage'
+            Effect: Allow
+            Resource: !GetAtt DeadLetterQueueForProducer.Arn
+            Principal:
+              Service: lambda.amazonaws.com
+            Condition:
+              ArnEquals:
+                'aws:SourceArn': !GetAtt ProducerLambda.Arn
+          - Action:
+              - 'SQS:SendMessage'
+            Effect: Allow
+            Resource: !GetAtt DeadLetterQueueForConsumer.Arn
+            Principal:
+              Service: lambda.amazonaws.com
+            Condition:
+              ArnEquals:
+                'aws:SourceArn': !GetAtt ConsumerLambda.Arn
+  RoleForAddAPartProducer:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Ref myRoleNameForFunctionProducer
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Action:
+              - "sts:AssumeRole"
+            Principal:
+              Service:
+                - "lambda.amazonaws.com"
+      Policies:
+        - PolicyName: allowLambdaLogs
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: CreateLogGroup
+                Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                Resource: !Sub 'arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:*'
+              - Sid: CreateInsertIntoLogStream
+                Effect: Allow
+                Action:
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents   
+                Resource: !Sub 'arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/*'
+        - PolicyName: allowSqsSend
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - sqs:GetQueueUrl
+                  - sqs:GetQueueAttributes
+                  - sqs:SendMessage
+                  - sqs:SendMessageBatch
+                Resource:
+                  - !GetAtt QueueForProducerToSendTo.Arn
+                  - !GetAtt DeadLetterQueueForProducer.Arn
+        - PolicyName: allowEncryptKeyForQueueandLambda
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - kms:Encrypt
+                  - kms:GenerateDataKey*
+                  - kms:DescribeKey
+                  - kms:Decrypt
+                Resource:
+                  - !Ref myEncryptKeyArnForQueueAndLambda
+        - PolicyName: allowEncryptKeyForSupportingBuckets
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - kms:DescribeKey
+                  - kms:Decrypt
+                Resource:
+                  - !Ref myEncryptKeyArnForSupportingFilesBucket
+        - PolicyName: allowEncryptKeyForReadInBuckets
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - kms:Encrypt
+                  - kms:GenerateDataKey*
+                  - kms:DescribeKey
+                  - kms:Decrypt
+                Resource:
+                  - !Ref myEncryptKeyArnForTriggeringBuckets
+        - PolicyName: readFilesFromBucket
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - 's3:GetObject'
+                  - 's3:GetObjectTagging'
+                  - 's3:ListBucket'
+                  - 's3:GetBucketLocation'
+                Resource:
+                  - !Sub 'arn:${AWS::Partition}:s3:::${myBucketNameForSupportingFiles}'
+                  - !Sub 'arn:${AWS::Partition}:s3:::${myBucketNameForSupportingFiles}/*'
+                  - !Sub 'arn:${AWS::Partition}:s3:::${myBucketNameToTriggerProducerCloudTrail}'
+                  - !Sub 'arn:${AWS::Partition}:s3:::${myBucketNameToTriggerProducerCloudTrail}/*'
+                  - !Sub 'arn:${AWS::Partition}:s3:::${myBucketNameToTriggerProducerCloudWatch}'
+                  - !Sub 'arn:${AWS::Partition}:s3:::${myBucketNameToTriggerProducerCloudWatch}/*'
+        - PolicyName: writeReadInFilesForRename
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - 's3:AbortMultipartUpload'
+                  - 's3:DeleteObject'
+                  - 's3:PutObject'
+                  - 's3:PutObjectTagging'
+                  - 's3:GetObject' 
+                  - 's3:CopyObject'
+                Resource:
+                  - !Sub 'arn:${AWS::Partition}:s3:::${myBucketNameToTriggerProducerCloudTrail}/*'
+                  - !Sub 'arn:${AWS::Partition}:s3:::${myBucketNameToTriggerProducerCloudWatch}/*'
+  RoleForAddAPartConsumer:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Ref myRoleNameForFunctionConsumer
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Action:
+              - "sts:AssumeRole"
+            Principal:
+              Service:
+                - "lambda.amazonaws.com"
+      Policies:
+        # Explicit deny to protect existing metastore objects & prevent job
+        # injection of objects outside engineered process
+        - PolicyName: DenyDroppingDatabase
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Deny
+                Action:
+                  - glue:CreateTable
+                  - glue:DeleteTable
+                  - glue:BatchDeleteTable
+                  - glue:CreateDatabase
+                  - glue:DeleteDatabase
+                  - glue:UpdateDatabase
+                  - glue:DeleteTableVersion
+                Resource:
+                  - '*'
+        - PolicyName: allowLambdaLogs
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: CreateLogGroup
+                Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                Resource: !Sub 'arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:*'
+              - Sid: CreateInsertIntoLogStream
+                Effect: Allow
+                Action:
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: !Sub 'arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/*'
+        - PolicyName: allowSqsReceive
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - sqs:GetQueueUrl
+                  - sqs:GetQueueAttributes
+                  - sqs:ReceiveMessage
+                  - sqs:DeleteMessage
+                  - sqs:DeleteMessageBatch
+                Resource:
+                  - !GetAtt QueueForProducerToSendTo.Arn
+        - PolicyName: allowSqsSendToDLQ
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - sqs:SendMessage
+                Resource:
+                  - !GetAtt DeadLetterQueueForConsumer.Arn
+        - PolicyName: allowEncryptKeyForQueue
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - kms:Decrypt
+                  - kms:DescribeKey
+                Resource:
+                  - !Ref myEncryptKeyArnForQueueAndLambda
+        - PolicyName: allowEncryptKeyForSupportingBuckets
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - kms:DescribeKey
+                  - kms:Decrypt
+                Resource:
+                  - !Ref myEncryptKeyArnForSupportingFilesBucket
+        - PolicyName: allowAddPartition
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - glue:GetTable
+                  - glue:GetTables
+                  - glue:GetDatabase
+                  - glue:GetDatabases
+                  - glue:GetPartition
+                  - glue:GetPartitions
+                  - glue:CreatePartition
+                  - glue:BatchCreatePartition
+                Resource:
+                  - !Sub 'arn:${AWS::Partition}:glue:${AWS::Region}:${AWS::AccountId}:catalog'
+                  - !Sub 'arn:${AWS::Partition}:glue:${AWS::Region}:${AWS::AccountId}:database/${myGlueDatabaseName}'
+                  - !Sub 'arn:${AWS::Partition}:glue:${AWS::Region}:${AWS::AccountId}:table/*'
+                  - !Sub 'arn:${myCentralLakePartition}:glue:${myCentralLakeRegion}:${myCentralLakeAccountId}:catalog'
+                  - !Sub 'arn:${myCentralLakePartition}:glue:${myCentralLakeRegion}:${myCentralLakeAccountId}:database/*'
+                  - !Sub 'arn:${myCentralLakePartition}:glue:${myCentralLakeRegion}:${myCentralLakeAccountId}:table/*'
+        - PolicyName: readSupportingFilesFromBucket
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - 's3:GetObject'
+                  - 's3:GetObjectTagging'
+                  - 's3:ListBucket'
+                  - 's3:GetBucketLocation'
+                Resource:
+                  - !Sub 'arn:${AWS::Partition}:s3:::${myBucketNameForSupportingFiles}'
+                  - !Sub 'arn:${AWS::Partition}:s3:::${myBucketNameForSupportingFiles}/*'
+  ProducerLambda:
+    Type: AWS::Lambda::Function
+    DependsOn: RoleForAddAPartProducer
+    Properties:
+      Handler: !Ref myHandler
+      Code:
+        S3Bucket: !Ref myBucketNameForSupportingFiles
+        S3Key: !Ref myCodeForAddAPartProducer
+      Environment:
+        Variables:
+          thequeueurl : !GetAtt QueueForProducerToSendTo.QueueUrl
+      KmsKeyArn: !Ref myEncryptKeyArnForQueueAndLambda
+      FunctionName: !Ref myFunctionNameForProducer
+      MemorySize: 256
+      Role: !GetAtt RoleForAddAPartProducer.Arn
+      Runtime: python3.12
+      Timeout: 90
+      ReservedConcurrentExecutions: 99
+      DeadLetterConfig:
+        TargetArn: !GetAtt DeadLetterQueueForProducer.Arn
+  ConsumerLambda:
+    Type: AWS::Lambda::Function
+    DependsOn: RoleForAddAPartConsumer
+    Properties:
+      Handler: !Ref myHandler
+      Code:
+        S3Bucket: !Ref myBucketNameForSupportingFiles
+        S3Key: !Ref myCodeForAddAPartConsumer
+      Environment:
+        Variables:
+          DATABASE_IN_GLUE: !Ref myGlueDatabaseName
+      KmsKeyArn: !Ref myEncryptKeyArnForQueueAndLambda
+      FunctionName: !Ref myFunctionNameForConsumer
+      MemorySize: 256
+      Role: !GetAtt RoleForAddAPartConsumer.Arn
+      Runtime: python3.12
+      Timeout: 90
+      ReservedConcurrentExecutions: 99
+      DeadLetterConfig:
+        TargetArn: !GetAtt DeadLetterQueueForConsumer.Arn
+  EventSourceMapping:
+    Type: AWS::Lambda::EventSourceMapping
+    DependsOn: ConsumerLambda
+    Properties:
+      BatchSize: 5
+      Enabled: true
+      EventSourceArn: !GetAtt QueueForProducerToSendTo.Arn
+      FunctionName: !GetAtt ConsumerLambda.Arn
+  S3CloudTrailReadInLambdaPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !GetAtt ProducerLambda.Arn
+      Action: lambda:InvokeFunction
+      Principal: s3.amazonaws.com
+      SourceAccount: !Ref 'AWS::AccountId'
+      SourceArn: !Sub 'arn:${AWS::Partition}:s3:::${myBucketNameToTriggerProducerCloudTrail}'
+  S3CloudWatchReadInLambdaPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !GetAtt ProducerLambda.Arn
+      Action: lambda:InvokeFunction
+      Principal: s3.amazonaws.com
+      SourceAccount: !Ref 'AWS::AccountId'
+      SourceArn: !Sub 'arn:${AWS::Partition}:s3:::${myBucketNameToTriggerProducerCloudWatch}'
+Outputs:
+  AddTargetForS3EventNotification:
+    Description: "Add this Lambda Function as an S3 Event Notification target"
+    Value: !GetAtt ProducerLambda.Arn
+  AddThisProducerLambdaRoleToExistingKeyUsedForQueue:
+    Description: "Needed if SQS queue messages use KMS key to encrypt/decrypt"
+    Value: !GetAtt RoleForAddAPartProducer.Arn
+  AddThisConsumerLambdaRoleToExistingKeyUsedForQueue:
+    Description: "Needed if SQS queue messages use KMS key to encrypt/decrypt"
+    Value: !GetAtt RoleForAddAPartConsumer.Arn
+  AddThisProducerRoleToExistingKeyPolicy:
+    Description: "Existing key policy must allow Glue job to do generate, describe, decrypt"
+    Value: !GetAtt RoleForAddAPartProducer.Arn
+  AddThisConsumerRoleToExistingKeyPolicy:
+    Description: "Existing key policy must allow Glue job to do generate, describe, decrypt"
+    Value: !GetAtt RoleForAddAPartConsumer.Arn
+  DeadLetterQueueArnForProducer:
+    Description: "ARN of the Dead Letter Queue for Producer Lambda"
+    Value: !GetAtt DeadLetterQueueForProducer.Arn
+  DeadLetterQueueArnForConsumer:
+    Description: "ARN of the Dead Letter Queue for Consumer Lambda"
+    Value: !GetAtt DeadLetterQueueForConsumer.Arn
