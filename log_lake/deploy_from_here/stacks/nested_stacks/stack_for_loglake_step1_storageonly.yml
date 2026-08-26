@@ -188,10 +188,9 @@ Resources:
           - Sid: DenyNonHttpsConnections
             Effect: Deny
             Principal: '*'
-            Action:
-              - 's3:PutObject'
-              - 's3:GetObject'
+            Action: 's3:*'
             Resource:
+              - !Sub 'arn:${AWS::Partition}:s3:::${myBucketNameForRawCloudTrail}'
               - !Sub 'arn:${AWS::Partition}:s3:::${myBucketNameForRawCloudTrail}/*'
             Condition:
               Bool:
@@ -291,10 +290,9 @@ Resources:
           - Sid: DenyNonHttpsConnections
             Effect: Deny
             Principal: '*'
-            Action:
-              - 's3:PutObject'
-              - 's3:GetObject'
+            Action: 's3:*'
             Resource:
+              - !Sub 'arn:${AWS::Partition}:s3:::${myBucketNameForRawCloudWatch}'
               - !Sub 'arn:${AWS::Partition}:s3:::${myBucketNameForRawCloudWatch}/*'
             Condition:
               Bool:
@@ -385,10 +383,9 @@ Resources:
           - Sid: DenyNonHttpsConnections
             Effect: Deny
             Principal: '*'
-            Action:
-              - 's3:PutObject'
-              - 's3:GetObject'
+            Action: 's3:*'
             Resource:
+              - !Sub 'arn:${AWS::Partition}:s3:::${myBucketNameForReadReadyCloudTrail}'
               - !Sub 'arn:${AWS::Partition}:s3:::${myBucketNameForReadReadyCloudTrail}/*'
             Condition:
               Bool:
@@ -479,10 +476,9 @@ Resources:
           - Sid: DenyNonHttpsConnections
             Effect: Deny
             Principal: '*'
-            Action:
-              - 's3:PutObject'
-              - 's3:GetObject'
+            Action: 's3:*'
             Resource:
+              - !Sub 'arn:${AWS::Partition}:s3:::${myBucketNameForReadReadyCloudWatch}'
               - !Sub 'arn:${AWS::Partition}:s3:::${myBucketNameForReadReadyCloudWatch}/*'
             Condition:
               Bool:
@@ -597,10 +593,9 @@ Resources:
           - Sid: DenyNonHttpsConnections
             Effect: Deny
             Principal: '*'
-            Action:
-              - 's3:PutObject'
-              - 's3:GetObject'
+            Action: 's3:*'
             Resource:
+              - !Sub 'arn:${AWS::Partition}:s3:::${myBucketNameForAccessLogs}'
               - !Sub 'arn:${AWS::Partition}:s3:::${myBucketNameForAccessLogs}/*'
             Condition:
               Bool:
@@ -699,10 +694,9 @@ Resources:
           - Sid: DenyNonHttpsConnections
             Effect: Deny
             Principal: '*'
-            Action:
-              - 's3:PutObject'
-              - 's3:GetObject'
+            Action: 's3:*'
             Resource:
+              - !Sub 'arn:${AWS::Partition}:s3:::${myBucketNameForAthenaQueries}'
               - !Sub 'arn:${AWS::Partition}:s3:::${myBucketNameForAthenaQueries}/*'
             Condition:
               Bool:
