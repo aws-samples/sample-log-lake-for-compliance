@@ -236,10 +236,9 @@ Resources:
           - Sid: DenyNonHttpsConnections
             Effect: Deny
             Principal: '*'
-            Action:
-              - 's3:PutObject'
-              - 's3:GetObject'
+            Action: 's3:*'
             Resource:
+              - !Sub 'arn:${AWS::Partition}:s3:::as-${myLabel}-store-bedrock-raw'
               - !Sub 'arn:${AWS::Partition}:s3:::as-${myLabel}-store-bedrock-raw/*'
             Condition:
               Bool:
@@ -328,10 +327,9 @@ Resources:
           - Sid: DenyNonHttpsConnections
             Effect: Deny
             Principal: '*'
-            Action:
-              - 's3:PutObject'
-              - 's3:GetObject'
+            Action: 's3:*'
             Resource:
+              - !Sub 'arn:${AWS::Partition}:s3:::as-${myLabel}-store-bedrock-readready'
               - !Sub 'arn:${AWS::Partition}:s3:::as-${myLabel}-store-bedrock-readready/*'
             Condition:
               Bool:
